@@ -161,6 +161,7 @@ const COLORS: Record<string, string> = {
   transcribe: "#4E8C6A",
   "model load": "#B08A3E",
   summarise: "#C2571A",
+  images: "#7A6E9E",
 };
 
 const ENGINE = "http://127.0.0.1:8765";

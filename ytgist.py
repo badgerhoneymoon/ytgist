@@ -45,7 +45,7 @@ CACHE_V = 1
 #
 # These are ESTIMATES SHOWN TO A HUMAN, so they are tuned to run slightly long. An ETA
 # that expires while you are still waiting is worse than one you beat.
-RATE = {"download": 0.30, "transcribe": 0.65, "summarise": 4.2}
+RATE = {"download": 0.30, "transcribe": 0.65, "summarise": 4.2, "images": 0.18}
 
 # THE HARD LIMIT. Beyond the largest context we will start, the only way to proceed is to
 # summarise the transcript in halves and merge — each half written blind to the other, so
@@ -95,12 +95,14 @@ def estimate(minutes: float, cached: bool) -> dict:
         load = load[0] + load[1] * minutes
 
     if cached:
-        return {"model load": load, "summarise": cost("summarise")}
+        return {"model load": load, "summarise": cost("summarise"),
+                "images": cost("images")}
     return {"read info": 2.0,
             "download": cost("download"),
             "transcribe": cost("transcribe"),
             "model load": load,
-            "summarise": cost("summarise")}
+            "summarise": cost("summarise"),
+            "images": cost("images")}
 
 
 EXPAND_MAX = 8 * 60         # a step's span, capped — beyond this it stops being one point
