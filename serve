@@ -1,0 +1,3 @@
+#!/bin/bash
+exec /Users/denisburkatskiy/Python/dictate/.venv/bin/python \
+     /Users/denisburkatskiy/Python/ytgist/serve.py "$@"

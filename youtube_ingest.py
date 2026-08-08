@@ -64,8 +64,18 @@ def _classify(stderr: str) -> tuple:
         ("geo", "geo restricted", "That video is blocked in this country."),
         ("members", "members-only", "That video is members-only."),
         ("members", "join this channel", "That video is members-only."),
-        ("network", "unable to download", "Network problem reaching YouTube."),
+        # 403 on the MEDIA url is not a network problem — it is YouTube refusing this
+        # yt-dlp. It cost a debugging round because "unable to download" matched the
+        # network rule first and buried the real cause (2026-08-08: the installed
+        # yt-dlp was 10 months old and could not handle YouTube's SABR streaming).
+        # Specific rules must come BEFORE generic ones.
+        ("blocked", "403: forbidden", "YouTube refused the download (HTTP 403). Your "
+                                      "yt-dlp is probably out of date — try: brew upgrade yt-dlp"),
+        ("blocked", "sabr", "YouTube is forcing SABR streaming for this video and your "
+                            "yt-dlp can't handle it — try: brew upgrade yt-dlp"),
         ("network", "temporary failure", "Network problem reaching YouTube."),
+        ("network", "unable to download", "Couldn't download the audio — see the yt-dlp "
+                                          "error above."),
     ]
     for kind, needle, msg in table:
         if needle in s:

@@ -105,30 +105,57 @@ def transcribe(wav_path):
 
 
 # ------------------------------------------------------------------------ main
-def run(url, question=None, model_key="dense", refresh=False):
+def run(url, question=None, model_key="dense", refresh=False, progress=None):
+    timings = {}                 # phase → seconds; the UI draws these as a stacked bar
+
+    class phase:
+        """Times a phase. Every stage of this pipeline has a wildly different cost
+        (model load 2s, download 8s, summary 50s) and until you see them side by side
+        you optimise the wrong one (Denis, 2026-08-08)."""
+        def __init__(self, name):
+            self.name = name
+        def __enter__(self):
+            self.t = time.time(); return self
+        def __exit__(self, *e):
+            timings[self.name] = round(time.time() - self.t, 1); return False
+
+    def step(stage, pct, msg=""):
+        """One place that reports where we are — the CLI prints it, the web UI streams it."""
+        if progress:
+            progress({"stage": stage, "pct": pct, "msg": msg})
+
     swept = yt.sweep(TMP)
     if swept:
         log(f"  swept {swept} leftover download dir(s) from an earlier killed run")
 
+    step("parse", 2, "reading the link")
     vid = yt.video_id(url)
     cached = None if refresh else load_cached(vid)
 
     if cached:
         log(f"→ cached transcript for {vid} ({len(cached['sentences'])} segments)")
+        step("cached", 70, f"using the cached transcript ({len(cached['sentences'])} segments)")
+        timings["_cached"] = True     # so the UI can EXPLAIN the missing phases
         meta, sentences = cached, cached["sentences"]
     else:
         log(f"→ checking {vid} …")
-        info = yt.probe(url)
+        step("probe", 5, "checking the video")
+        with phase("check"):
+            info = yt.probe(url)
         mins = info["duration"] / 60
         log(f"   {gist_prompt.sanitize(info['title'])}  ({mins:.0f} min)")
         d = yt.temp_dir(TMP)
         try:
             log("→ downloading audio only …")
-            wav = yt.fetch_audio(url, d)
+            step("download", 15, f"downloading audio — {info['duration']/60:.0f} min")
+            with phase("download"):
+                wav = yt.fetch_audio(url, d)
             size = os.path.getsize(wav) / 1e6
             log(f"→ transcribing {size:.0f} MB of audio …")
+            step("transcribe", 40, f"transcribing {size:.0f} MB on the GPU")
             t0 = time.time()
-            sentences = transcribe(wav)
+            with phase("transcribe"):
+                sentences = transcribe(wav)
             el = time.time() - t0
             log(f"   {len(sentences)} segments in {el:.0f}s "
                 f"({info['duration'] / max(el, 0.1):.0f}x realtime)")
@@ -147,8 +174,11 @@ def run(url, question=None, model_key="dense", refresh=False):
     user = (gist_prompt.ASK_USER.format(question=question, transcript=transcript)
             if question else gist_prompt.GIST_USER.format(transcript=transcript))
 
+    step("summarise", 75, "waking the 27B and summarising")
     log("→ summarising …")
-    with model_client.Server.acquire(model=MODELS[model_key], log=log) as srv:
+    with phase("model load"):
+        _srv = model_client.Server.acquire(model=MODELS[model_key], log=log)
+    with _srv as srv:
         need = srv.count_tokens(gist_prompt.SYSTEM + user) + 1400
         if need > srv.ctx:
             log(f"   transcript needs ~{need} tokens, server holds {srv.ctx} — "
@@ -162,8 +192,10 @@ def run(url, question=None, model_key="dense", refresh=False):
             out = srv.chat(gist_prompt.SYSTEM,
                            gist_prompt.GIST_USER.format(transcript="\n".join(parts)))
         else:
-            out = srv.chat(gist_prompt.SYSTEM, user)
+            with phase("summarise"):
+                out = srv.chat(gist_prompt.SYSTEM, user)
 
+    step("done", 100, "")
     text, dropped = gist_prompt.verify(out, sentences, vid)
     print()
     print(gist_prompt.sanitize(meta.get("title", "")))
@@ -171,6 +203,14 @@ def run(url, question=None, model_key="dense", refresh=False):
     print(gist_prompt.sanitize(text))
     if dropped:
         log(f"\n  ({dropped} invented timestamp(s) removed — the text was kept)")
+    run.last = {"title": meta.get("title", ""), "markdown": text, "dropped": dropped,
+                "video_id": vid, "timings": timings,
+                "duration": meta.get("duration", 0), "cached": was_cached}
+    was_cached = timings.pop("_cached", False)
+    run.last_cached = was_cached
+    total = sum(timings.values())
+    log("\n  " + " · ".join(f"{k} {v:g}s" for k, v in timings.items())
+        + f"  =  {total:.0f}s total")
     return 0
 
 
