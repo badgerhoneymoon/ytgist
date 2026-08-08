@@ -52,6 +52,15 @@ Someone reading the sentences should understand WHY each step follows.
 
 Put the [MM:SS] at the end of the headline line, copied exactly from the transcript.
 
+After each step's sentences, add ONE line:
+IMAGE: <the single real, nameable thing this step is about — a person, an
+organisation, a party, a place, a company> — or "IMAGE: none".
+
+Say "none" whenever the step is about a feeling, a trend, a statistic or an idea.
+There is no photograph of "rising anxiety", and illustrating it with a stock crowd
+would imply something the speaker never said. Name the entity exactly as it would
+be titled in an encyclopedia (a person's full name, an organisation's real name).
+
 Open with a TL;DR before step 1 — and apply the SAME sentence rule to it. The steps got
 short sentences while the TL;DR stayed one clause-chained monster, which reads as a wall
 however short it is (Denis, 2026-08-08):

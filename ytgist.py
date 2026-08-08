@@ -18,6 +18,7 @@ through parakeet-mlx's PUBLIC from_pretrained. Same model, no coupling, and Myna
 import argparse
 import json
 import os
+import re
 import glob
 import shutil
 import signal
@@ -254,7 +255,43 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None):
             with phase("summarise"):
                 out = srv.chat(gist_prompt.SYSTEM, user)
 
+    # IMAGE: lines → real pictures. Runs AFTER generation so a slow lookup never delays
+    # the text, and every failure is silent: a step with no resolvable subject simply has
+    # no image, which is the correct outcome for "anxiety rose to 57%".
+    try:
+        import entities
+        steps = []
+        for block in out.split("**")[1:]:
+            m = re.search(r"IMAGE:\s*(.+)", block)
+            steps.append({"image_query": (m.group(1).strip() if m else "")})
+        entities.illustrate_named(steps)
+        images = [st.get("image") for st in steps]
+        if any(images):
+            log(f"  illustrated {sum(1 for i in images if i)}/{len(images)} steps")
+    except Exception as exc:
+        log(f"  images skipped ({exc!r})")
+        images = []
+    out = re.sub(r"^\s*IMAGE:.*$", "", out, flags=re.M)   # never show the directive
+
     step("done", 100, "")
+    # IMAGE: lines → real pictures. AFTER generation, so a slow lookup never delays the
+    # text, and silent on failure: a step with no resolvable subject simply has no image,
+    # which is the right outcome for "anxiety rose to 57%".
+    images = []
+    try:
+        import entities
+        steps = []
+        for block in out.split("**")[1:]:
+            m = re.search(r"IMAGE:\s*(.+)", block)
+            steps.append({"image_query": (m.group(1).strip() if m else "")})
+        entities.illustrate_named(steps)
+        images = [st.get("image") for st in steps]
+        if any(images):
+            log(f"  illustrated {sum(1 for i in images if i)}/{len(images)} steps")
+    except Exception as exc:
+        log(f"  images skipped ({exc!r})")
+    out = re.sub(r"^\s*IMAGE:.*$", "", out, flags=re.M)   # never show the directive
+
     was_cached = bool(timings.pop("_cached", False))   # popped BEFORE any consumer
     text, dropped = gist_prompt.verify(out, sentences, vid)
     print()

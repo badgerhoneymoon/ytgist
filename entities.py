@@ -117,6 +117,63 @@ def image_for(name: str, lang: str = "ru"):
     return None
 
 
+def commons_search(query: str):
+    """Shoebill's approach, borrowed: search Commons FILES, prefer JPEG, prefer large.
+
+    Used only as a FALLBACK after exact-title resolution fails, because search always
+    answers — and answers confidently wrong when it has nothing good (it matched
+    'Kirienko strategy' to Pavel Durov). Progressive simplification is Shoebill's too:
+    try the full query, then its first three words."""
+    for q in [query, " ".join(query.split()[:3])][: 2 if len(query.split()) > 3 else 1]:
+        try:
+            d = _api_commons({
+                "action": "query", "format": "json", "generator": "search",
+                "gsrsearch": q, "gsrnamespace": "6", "gsrlimit": "5",
+                "prop": "imageinfo", "iiprop": "url|mime", "iiurlwidth": "400",
+            })
+            cands = []
+            for p in ((d.get("query") or {}).get("pages") or {}).values():
+                info = (p.get("imageinfo") or [{}])[0]
+                if info.get("mime", "").startswith("image/") and info.get("thumburl"):
+                    cands.append((info.get("mime") != "image/jpeg",
+                                  -int(info.get("thumbwidth") or 0),
+                                  info["thumburl"], p.get("title", q)))
+            if cands:
+                cands.sort()
+                _, _, url, title = cands[0]
+                return (url, title.replace("File:", ""),
+                        "https://commons.wikimedia.org/wiki/"
+                        + urllib.parse.quote(title.replace(" ", "_")))
+        except Exception:
+            continue
+    return None
+
+
+def _api_commons(params):
+    url = "https://commons.wikimedia.org/w/api.php?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        return json.loads(r.read().decode())
+
+
+def illustrate_named(steps, lang="ru"):
+    """Illustrate steps whose IMAGE: line names something real.
+
+    The model decides WHETHER an image is warranted and WHAT it is — the regex version
+    guessed from capitalised words and matched 'Kirienko strategy to weaken New People'
+    to Pavel Durov. Wikipedia's exact-title page image first (precise), Commons search
+    only as a fallback (broad). A step with no name, or a name we cannot resolve, gets
+    no image at all."""
+    for st in steps:
+        name = (st.get("image_query") or "").strip()
+        if not name or name.lower() in ("none", "нет", "-"):
+            continue
+        hit = image_for(name, lang) or commons_search(name)
+        if hit:
+            st["image"] = {"src": hit[0], "label": hit[1], "href": hit[2], "query": name}
+    return steps
+
+
 def illustrate(steps, lang="ru"):
     """Attach at most one image per step. Steps keep their order and their text; a step
     we cannot illustrate is returned untouched."""

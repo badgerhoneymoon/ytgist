@@ -51,8 +51,8 @@ export default function History({
           <li key={r.id}>
             <button
               onClick={() => onPick(r.id)}
-              className="group flex w-full items-center gap-3.5 py-2.5 text-left
-                         transition-colors duration-150 hover:bg-ink/[0.02]
+              className="group flex w-full items-center gap-3.5 rounded-lg px-2 py-2.5 text-left
+                         transition-colors duration-150 hover:bg-ink/[0.035]
                          focus-visible:outline-2 focus-visible:outline-offset-[-2px]
                          focus-visible:outline-accent"
             >
@@ -65,16 +65,32 @@ export default function History({
                 <span className="block truncate text-[14.5px] leading-snug text-ink">
                   {r.title}
                 </span>
-                <span className="mt-0.5 block text-[12.5px] text-soft">
-                  {Math.round(r.duration / 60)} min · {r.segments} segments
-                  {r.has_summary ? " · summary saved" : " · transcript only"}
+                <span className="mt-0.5 flex items-center gap-1.5 text-[12.5px] text-soft">
+                  {/* What clicking COSTS, as a dot not a button: a saved summary opens
+                      instantly, a transcript-only row pays ~40s of model time. That is
+                      information, so it belongs in the meta line. The previous version
+                      styled it as "summarise →" on the right, which looked like a button
+                      inside a button and read as broken (Denis, 2026-08-08). */}
+                  <i
+                    className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${
+                      r.has_summary ? "bg-good" : "bg-line"
+                    }`}
+                  />
+                  {r.has_summary ? "summary ready" : "needs summarising"}
+                  <span className="text-soft/60">·</span>
+                  {Math.round(r.duration / 60)} min
                 </span>
               </span>
+              {/* The only affordance: a chevron that leans in on hover. It is decoration
+                  on a row that is itself the button, so it can never look separately
+                  clickable. */}
               <span
-                className="shrink-0 text-[12px] font-medium text-soft opacity-0 transition-opacity
-                           duration-150 group-hover:opacity-100"
+                aria-hidden
+                className="shrink-0 pr-1 text-[15px] text-soft/40 transition-all duration-200
+                           group-hover:translate-x-0.5 group-hover:text-accent"
+                style={{ transitionTimingFunction: "var(--ease-out-expo)" }}
               >
-                {r.has_summary ? "open" : "summarise"} →
+                →
               </span>
             </button>
           </li>

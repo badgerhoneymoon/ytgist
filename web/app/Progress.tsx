@@ -3,28 +3,28 @@
 import { useEffect, useState } from "react";
 import type { Stage } from "./types";
 
-/** Named stages and a bar that KEEPS MOVING.
+/** ONE segmented track, not a bar plus a row of pills.
  *
- *  The honest problem: summarising takes ~40s and emits no intermediate signal, so a
- *  literal progress bar sits frozen at 75% for most of the wait and reads as a hang —
- *  which is exactly what happened. So the bar advances on its own within the current
- *  stage, easing toward that stage's ceiling and never reaching it. That is not a fake
- *  progress bar: the ceiling is real, only the motion inside it is estimated, and a real
- *  frame always overrides the estimate.
+ *  The previous version showed a progress bar AND four coloured chips AND a status line —
+ *  three indicators competing to say the same thing, which is why it read as noisy
+ *  (Denis: "a bit weird"). Now the stages ARE the bar: each one is a segment sized to how
+ *  long it actually takes, so the shape itself tells you that summarising is most of the
+ *  wait. It is also the same visual object as the timing bar in the finished result —
+ *  prediction and outcome in the same language.
  *
- *  Weights come from MEASURED costs (ytgist.py): read info ~1s, download ~8s,
- *  transcribe ~10s, summarise ~40s. Cached runs skip the middle two entirely.
+ *  Weights are MEASURED (ytgist.py): read info ~1s, download ~8s, transcribe ~10s,
+ *  summarise ~40s.
  */
-const STEPS: { key: Stage; label: string; ceiling: number; secs: number }[] = [
-  { key: "check", label: "reading video info", ceiling: 12, secs: 2 },
-  { key: "download", label: "downloading audio", ceiling: 38, secs: 10 },
-  { key: "transcribe", label: "transcribing", ceiling: 72, secs: 12 },
-  { key: "summarise", label: "summarising", ceiling: 98, secs: 45 },
+const STEPS: { key: Stage; label: string; weight: number; secs: number }[] = [
+  { key: "check", label: "reading video info", weight: 1, secs: 2 },
+  { key: "download", label: "downloading audio", weight: 8, secs: 10 },
+  { key: "transcribe", label: "transcribing", weight: 10, secs: 12 },
+  { key: "summarise", label: "summarising", weight: 40, secs: 45 },
 ];
+const TOTAL = STEPS.reduce((a, s) => a + s.weight, 0);
 
 export default function Progress({
   stage,
-  pct,
   msg,
 }: {
   stage: Stage | null;
@@ -32,73 +32,91 @@ export default function Progress({
   msg: string;
 }) {
   const i = STEPS.findIndex((s) => s.key === stage);
-  const [crept, setCrept] = useState(pct);
+  // How far INTO the current stage we are, 0→1. Summarising emits no intermediate signal
+  // for ~40s, so a literal bar would freeze and read as a hang. This eases toward the end
+  // of the current segment without ever completing it: the segment boundary is real, only
+  // the motion inside it is estimated, and the next real frame always wins.
+  const [within, setWithin] = useState(0);
 
   useEffect(() => {
-    setCrept((c) => Math.max(c, pct));
+    setWithin(0);
     if (i < 0) return;
-    const { ceiling, secs } = STEPS[i];
     const id = setInterval(() => {
-      // Approach the ceiling asymptotically: fast at first, then slower — the shape of
-      // "still working" rather than "nearly done".
-      setCrept((c) => (c >= ceiling ? c : c + (ceiling - c) * (0.35 / secs)));
-    }, 250);
+      setWithin((w) => w + (0.97 - w) * (0.3 / STEPS[i].secs));
+    }, 200);
     return () => clearInterval(id);
-  }, [pct, i]);
+  }, [i]);
 
   return (
-    <div className="col-start-2 mt-10">
-      <div className="h-1 overflow-hidden rounded-full bg-line">
-        <div
-          className="h-full rounded-full bg-accent"
-          style={{
-            width: `${Math.min(crept, 99)}%`,
-            transition: "width 400ms var(--ease-out-expo)",
-          }}
-        />
-      </div>
-
-      <div className="mt-4 flex flex-wrap gap-2">
+    <div className="mt-10">
+      <div className="flex gap-1" aria-label="progress">
         {STEPS.map((s, n) => {
           const done = n < i;
           const now = n === i;
+          const fill = done ? 1 : now ? within : 0;
           return (
-            <span
+            <div
               key={s.key}
-              className={[
-                "flex items-center gap-1.5 rounded-full border px-3 py-1 text-[13px]",
-                "transition-all duration-300",
-                done ? "border-good/35 bg-good/[0.08] text-good" : "",
-                now ? "border-accent bg-accent font-semibold text-canvas shadow-[0_1px_6px_rgba(194,87,26,0.25)]" : "",
-                !done && !now ? "border-line text-soft/55" : "",
-              ].join(" ")}
-              style={{ transitionTimingFunction: "var(--ease-out-expo)" }}
+              className="h-1.5 overflow-hidden rounded-full bg-line/70"
+              style={{ flex: s.weight }}
             >
-              {done && <span className="text-[11px] font-bold">✓</span>}
-              {now && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />}
-              {s.label}
-            </span>
+              <div
+                className="h-full rounded-full"
+                style={{
+                  width: `${fill * 100}%`,
+                  background: done ? "var(--color-good)" : "var(--color-accent)",
+                  transition: "width 500ms var(--ease-out-expo), background 300ms",
+                }}
+              />
+            </div>
           );
         })}
       </div>
 
-      {msg && <p className="mt-3.5 text-[14px] text-soft">{msg}…</p>}
+      {/* Labels sit under their own segment, so the width IS the cost. Only the running
+          one is emphasised — done stages recede rather than shouting a green tick. */}
+      <div className="mt-2.5 flex gap-1">
+        {STEPS.map((s, n) => (
+          <div key={s.key} style={{ flex: s.weight }} className="min-w-0">
+            <span
+              className={[
+                "block truncate text-[12px] transition-colors duration-300",
+                n < i ? "text-soft/50" : "",
+                n === i ? "font-semibold text-accent" : "",
+                n > i ? "text-soft/35" : "",
+              ].join(" ")}
+            >
+              {s.label}
+            </span>
+          </div>
+        ))}
+      </div>
 
-      {/* A skeleton in the SHAPE of the answer, shown during the long tail. It tells the
-          eye what is coming, which is worth more than a spinner during a 40s wait. */}
+      {msg && <p className="mt-4 text-[14px] text-soft">{msg}…</p>}
+
       {stage === "summarise" && <Skeleton />}
     </div>
   );
 }
 
+/** A skeleton in the SHAPE of the answer — numbered rail, headline, three body lines.
+ *  During a 40-second wait it tells the eye what is coming, which beats a spinner. */
 function Skeleton() {
   return (
-    <div className="mt-10 space-y-8" aria-hidden>
-      {[92, 78, 85].map((w, i) => (
-        <div key={i} className="space-y-2.5">
-          <Bar w={`${w * 0.45}%`} h="h-4" delay={i * 120} />
-          <Bar w={`${w}%`} h="h-3" delay={i * 120 + 60} />
-          <Bar w={`${w - 18}%`} h="h-3" delay={i * 120 + 120} />
+    <div className="mt-12 space-y-13" aria-hidden>
+      {[0, 1, 2].map((i) => (
+        <div key={i} className="grid grid-cols-[3.75rem_minmax(0,1fr)]">
+          <div className="flex justify-end pr-3.5">
+            <Bar w="14px" h="h-3" delay={i * 140} />
+          </div>
+          <div className="space-y-3">
+            <Bar w={`${58 - i * 6}%`} h="h-4" delay={i * 140 + 40} />
+            <div className="space-y-2 pt-1">
+              <Bar w="94%" h="h-3" delay={i * 140 + 90} />
+              <Bar w="88%" h="h-3" delay={i * 140 + 140} />
+              <Bar w="61%" h="h-3" delay={i * 140 + 190} />
+            </div>
+          </div>
         </div>
       ))}
     </div>
@@ -107,11 +125,11 @@ function Skeleton() {
 
 function Bar({ w, h, delay }: { w: string; h: string; delay: number }) {
   return (
-    <div className={`relative overflow-hidden rounded bg-line/60 ${h}`} style={{ width: w }}>
+    <div className={`relative overflow-hidden rounded bg-line/50 ${h}`} style={{ width: w }}>
       <div
         className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent
-                   via-canvas/70 to-transparent"
-        style={{ animation: `shimmer 1.6s ${delay}ms infinite` }}
+                   via-canvas/80 to-transparent"
+        style={{ animation: `shimmer 1.8s ${delay}ms infinite` }}
       />
     </div>
   );

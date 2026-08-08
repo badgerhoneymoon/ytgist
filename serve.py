@@ -361,7 +361,8 @@ class Handler(BaseHTTPRequestHandler):
                    "timings": res.get("timings", {}),
                    "duration": res.get("duration", 0),
                    "cached": res.get("cached", False),
-                   "sentences": res.get("sentences") or []})
+                   "sentences": res.get("sentences") or [],
+                   "images": res.get("images") or []})
         except ytgist.yt.IngestError as e:
             q.put({"error": html.escape(str(e))})
         except Exception as e:                      # a crash must reach the page, not just stderr

@@ -50,8 +50,9 @@ export default function Home() {
   const [libKey, setLibKey] = useState(0);   // bumped after a run so the library refreshes
 
   const start = useCallback(
-    async (ask: string, refresh = false) => {
-      if (!url.trim() || busy) return;
+    async (ask: string, refresh = false, urlOverride?: string) => {
+      const target = (urlOverride ?? url).trim();
+      if (!target || busy) return;
       setGist(null);
       setError("");
       setPct(0);
@@ -61,7 +62,7 @@ export default function Home() {
       const res = await fetch(`${ENGINE}/api/gist`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, ask, refresh }),
+        body: JSON.stringify({ url: target, ask, refresh }),
       });
       const { job } = await res.json();
 
@@ -98,7 +99,7 @@ export default function Home() {
           done();
         }
         if (f.markdown !== undefined) {
-          const id = parseYouTube(url) ?? url.match(YT_ID)?.[1] ?? "";
+          const id = parseYouTube(target) ?? target.match(YT_ID)?.[1] ?? "";
           setGist(parseGist(f, id));
           setLibKey((k) => k + 1);
           done();
@@ -214,10 +215,16 @@ export default function Home() {
 
       {gist && <Result gist={gist} onRegenerate={() => start("", true)} />}
 
-      {!busy && !gist && (
+      {!busy && (
         <History
           refreshKey={libKey}
-          onPick={(id) => setUrl(`https://www.youtube.com/watch?v=${id}`)}
+          onPick={(id) => {
+            const u = `https://www.youtube.com/watch?v=${id}`;
+            setUrl(u);
+            setGist(null);
+            window.scrollTo({ top: 0, behavior: "smooth" });
+            start("", false, u);        // a saved summary opens instantly
+          }}
         />
       )}
     </main>
