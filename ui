@@ -1,0 +1,9 @@
+#!/bin/bash
+# Starts BOTH halves: the Python engine (transcription + model) and the Next UI.
+# One command, because two terminals for a personal tool is friction that compounds.
+set -e
+cd "$(dirname "$0")"
+pkill -f "ytgist/serve.py" 2>/dev/null || true
+./serve > /tmp/ytgist-serve.log 2>&1 &
+echo "engine  → http://127.0.0.1:8765  (log: /tmp/ytgist-serve.log)"
+cd web && exec npm run dev

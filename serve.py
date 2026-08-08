@@ -14,6 +14,7 @@ import html
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import traceback
@@ -33,10 +34,6 @@ PAGE = """<!doctype html>
 <style>
   :root { --ink:#221E1A; --body:#4A443C; --soft:#6F6A62; --line:#E6E1D8;
           --canvas:#FBFAF7; --accent:#C2571A; }
-  @media (prefers-color-scheme: dark) {
-    :root { --ink:#F5F2EC; --body:#C9C3B8; --soft:#8E877C; --line:#332F2A;
-            --canvas:#17150F; --accent:#E8823C; }
-  }
   * { box-sizing: border-box; }
   body { margin:0; padding:48px 24px; background:var(--canvas); color:var(--ink);
          font:16px/1.6 -apple-system,BlinkMacSystemFont,sans-serif; }
@@ -248,10 +245,33 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith("/api/oembed"):
+            self._oembed()
         elif self.path.startswith("/api/events"):
             self._events()
         else:
             self.send_error(404)
+
+    def _oembed(self):
+        """Title + thumbnail for a video id. No API key, no quota — and it doubles as
+        proof to the user that we understood the link they pasted."""
+        from urllib.parse import parse_qs, urlparse
+        import urllib.request
+        vid = (parse_qs(urlparse(self.path).query).get("v") or [""])[0]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{11}", vid or ""):
+            return self.send_error(400)
+        try:
+            url = ("https://www.youtube.com/oembed?format=json&url="
+                   + urllib.parse.quote(f"https://www.youtube.com/watch?v={vid}", safe=""))
+            with urllib.request.urlopen(url, timeout=6) as r:
+                body = r.read()
+        except Exception:
+            return self.send_error(502)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _events(self):
         from urllib.parse import parse_qs, urlparse
@@ -304,7 +324,8 @@ class Handler(BaseHTTPRequestHandler):
                    "markdown": _render(res["markdown"], res.get("sentences") or []),
                    "timings": res.get("timings", {}),
                    "duration": res.get("duration", 0),
-                   "cached": res.get("cached", False)})
+                   "cached": res.get("cached", False),
+                   "sentences": res.get("sentences") or []})
         except ytgist.yt.IngestError as e:
             q.put({"error": html.escape(str(e))})
         except Exception as e:                      # a crash must reach the page, not just stderr

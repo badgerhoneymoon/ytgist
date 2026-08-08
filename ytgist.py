@@ -124,6 +124,7 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None):
         if progress:
             progress({"stage": stage, "pct": pct, "msg": msg})
 
+    model_client.sweep_orphans(log)      # a 20GB leftover halves the GPU for this run
     swept = yt.sweep(TMP)
     if swept:
         log(f"  swept {swept} leftover download dir(s) from an earlier killed run")
@@ -139,8 +140,8 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None):
         meta, sentences = cached, cached["sentences"]
     else:
         log(f"→ checking {vid} …")
-        step("probe", 5, "checking the video")
-        with phase("check"):
+        step("probe", 5, "reading the video's title, length and type")
+        with phase("read info"):
             info = yt.probe(url)
         mins = info["duration"] / 60
         log(f"   {gist_prompt.sanitize(info['title'])}  ({mins:.0f} min)")

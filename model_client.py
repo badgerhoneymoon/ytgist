@@ -56,6 +56,34 @@ def _free_port() -> int:
     return port
 
 
+ALIAS = "ytgist-owned"          # the marker that makes orphan cleanup safe
+
+
+def sweep_orphans(log=print) -> int:
+    """Kill llama-servers WE started that outlived their run.
+
+    They orphan whenever the engine dies without unwinding — I killed serve.py under a
+    running job and its 20GB child kept going; the next run then started a SECOND one and
+    both crawled fighting for the GPU (2026-08-08). Only processes carrying our alias are
+    touched, so a server Denis started for something else is never at risk."""
+    import subprocess as sp
+    killed = 0
+    try:
+        out = sp.run(["pgrep", "-f", f"llama-server .*--alias {ALIAS}"],
+                     capture_output=True, text=True).stdout
+        for pid in [int(x) for x in out.split() if x.strip().isdigit()]:
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed += 1
+            except (ProcessLookupError, PermissionError):
+                pass
+    except Exception:
+        pass
+    if killed:
+        log(f"  swept {killed} orphaned llama-server(s) from an earlier run")
+    return killed
+
+
 class Server:
     """Either a borrowed server (we leave it alone) or one we own (we stop it)."""
 
@@ -100,8 +128,11 @@ class Server:
         if not os.path.isfile(model):
             raise ModelError(f"model not found: {model}")
         port = _free_port()
+        # --alias MARKS this server as ours. Without a marker there is no safe way to
+        # clean up an orphan: matching on "llama-server" would also kill one Denis
+        # started for his own work, which is precisely what ~/serve-model.sh does wrong.
         cmd = ["llama-server", "-m", model, "-c", str(CTX), "-fa", "on", "-np", "1",
-               "--port", str(port), "--reasoning", "off"]
+               "--port", str(port), "--reasoning", "off", "--alias", ALIAS]
         log(f"  starting llama-server on :{port} (own process, stopped when done)")
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 start_new_session=True)

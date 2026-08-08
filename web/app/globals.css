@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+/* The palette is Myna's — same maker, same hand. Warm ink on parchment, one accent. */
+@theme {
+  --color-canvas: #FBFAF7;
+  --color-ink: #221E1A;
+  --color-body: #4A443C;
+  --color-soft: #6F6A62;
+  --color-line: #E6E1D8;
+  --color-accent: #C2571A;
+  --color-good: #3F7D5A;
+}
+
+/* LIGHT ONLY (Denis, 2026-08-08: "fuck the dark mode"). color-scheme:light also stops
+   the browser auto-darkening form controls, which is what makes a light-only page look
+   half-broken on a Mac in dark mode. */
+html { color-scheme: light; }
+html, body { background: var(--color-canvas); color: var(--color-ink); }

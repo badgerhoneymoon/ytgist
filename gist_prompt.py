@@ -21,24 +21,39 @@ SYSTEM = (
     "transcript. Never invent, round, or interpolate one."
 )
 
-# SCANNABLE TAKEAWAYS — chosen by reading five formats side by side rather than by
-# argument (Denis: "that was the best"). Why it won, and what to preserve if it is ever
-# edited: the bold line STATES THE POINT rather than naming the topic, so skimming only
-# the bold lines still delivers the argument. A headline like "On the elections" fails
-# that test; "Elections are a loyalty test, not a contest" passes it.
-GIST_USER = """Summarise this transcript as scannable takeaways.
+# NUMBERED ARGUMENT WITH DEPTH — the format, after two rounds of side-by-side reading.
+#
+# Round 1 picked "scannable takeaways"; round 2 tried to make it easier to read and I cut
+# the CONTENT, which was the wrong axis. Denis: "you kind of missed my point… the best is
+# numbered argument, but all the others were just too concise… almost impossible to figure
+# out. I need just a bit more… one big sentence divided by shorter is of course better."
+#
+# So: KEEP the reasoning — the mechanism, the numbers, the why — and deliver it in SHORT
+# sentences instead of one clause-chained monster. Depth is the point; sentence length was
+# the problem. Do not "simplify" this prompt by shortening the output again.
+GIST_USER = """Lay out the speaker's argument as numbered steps that build on each other.
 
-Output 5-7 takeaways. Each one is exactly:
+Output 5-8 steps. Each step is exactly:
 
-**<a 3-6 word headline that STATES THE POINT, not the topic>** [MM:SS]
-<one sentence of substance underneath>
+<n>. **<3-6 word headline that states the point, not the topic>** [MM:SS]
+<2-4 sentences of real substance.>
 
-A reader who skims ONLY the bold lines must still get the whole argument.
-Put the [MM:SS] marker at the end of the headline line, copied exactly from the
-transcript. Order them the way the argument builds, not by importance.
+Rules for those sentences:
+- Each sentence under 18 words. One idea per sentence.
+- Never chain clauses with "which", "because ... and ...", or stacked commas.
+  Split into separate sentences instead.
+- KEEP the reasoning. Say why it follows, name the mechanism, give the concrete
+  detail — the number, the name, the date. Do not compress a step to one line.
+- Where it helps, open a step with a connector — But. So. Which means. — so the
+  argument visibly moves from the step before.
 
-Open with a single line before the takeaways:
-TL;DR <one sentence — the thing the speaker is actually arguing>
+Someone reading only the bold headlines should get the shape of the argument.
+Someone reading the sentences should understand WHY each step follows.
+
+Put the [MM:SS] at the end of the headline line, copied exactly from the transcript.
+
+Open with one line before step 1:
+TL;DR <one sentence — what the speaker is actually arguing>
 
 TRANSCRIPT
 <<<

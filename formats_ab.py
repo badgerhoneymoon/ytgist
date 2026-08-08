@@ -38,6 +38,44 @@ COMMON = (
     "discusses', no restating the topic.\n"
 )
 
+# ROUND 2 — the CONTENT was right, the READING was hard (Denis, 2026-08-08: "very deep
+# logical depth… but a bit hard to read"). So these five vary only how the same takeaway
+# is written and shaped, not what it contains.
+FORMATS_READABILITY = {
+    "terse": (
+        "Terse — two short sentences",
+        "Output 5-7 takeaways. Each is:\n\n"
+        "**<3-6 word headline stating the point>**\n"
+        "<TWO short sentences. Each under 15 words. No subordinate clauses, no 'which', "
+        "no 'because' chains — split into two sentences instead.>\n\n"
+        "Plain words. If a sentence needs a comma to survive, it is too long."),
+    "fact": (
+        "Fact-forward — the number leads",
+        "Output 5-7 takeaways. Each is:\n\n"
+        "**<3-6 word headline stating the point>**\n"
+        "<the single most concrete fact — a number, a name, a date — as a short fragment>\n"
+        "<one short sentence saying why it matters>\n\n"
+        "If a takeaway has no concrete fact, say what was claimed in five words instead."),
+    "grouped": (
+        "Grouped by theme",
+        "Group the takeaways under 2-3 plain-language headings that name the parts of the "
+        "argument (for example: what they planned · what is going wrong · how people feel).\n"
+        "Under each heading, 2-3 takeaways:\n\n"
+        "## <heading>\n**<3-6 word point>** — <one short sentence>\n\n"
+        "The headings alone should sketch the shape of the argument."),
+    "arc": (
+        "Numbered argument",
+        "Output the argument as 5-7 numbered steps that BUILD on each other.\n\n"
+        "<n>. **<3-6 word point>**\n<one short sentence. Start with a connector where it "
+        "helps — 'But', 'So', 'Which means' — so the reader feels the argument moving.>\n\n"
+        "Someone reading only the numbers in order should follow the logic."),
+    "tension": (
+        "Claim vs counter-force",
+        "The speaker describes a PLAN and the things working AGAINST it. Show both.\n\n"
+        "**<3-6 word point>**\nPlan: <short fragment>\nAgainst it: <short fragment>\n\n"
+        "5-7 of these. Where a takeaway is only one side, write '—' for the other."),
+}
+
 FORMATS = {
     "brief": (
         "Analyst's brief",
@@ -82,8 +120,9 @@ def generate(vid):
     results = {}
     # ONE server for all five: loading the 27B per format would triple the wall clock
     # for no benefit, and the point of the exercise is the prompts, not the plumbing.
+    table = FORMATS_READABILITY if os.environ.get("YTGIST_ROUND") == "2" else FORMATS
     with model_client.Server.acquire(log=lambda m: print(f"  {m}", file=sys.stderr)) as srv:
-        for key, (label, instruction) in FORMATS.items():
+        for key, (label, instruction) in table.items():
             t = time.time()
             print(f"  → {label} …", file=sys.stderr, flush=True)
             out = srv.chat(COMMON + instruction,
