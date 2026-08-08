@@ -352,6 +352,28 @@ class Handler(BaseHTTPRequestHandler):
         _jobs.pop(job, None)
 
     def do_POST(self):
+        if self.path == "/api/expand":
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}") or {}
+            # Takes the SAME run lock as a gist. Expanding starts a model server, and two
+            # of those is how we lost a run this morning.
+            with _RUN:
+                try:
+                    text = ytgist.expand(
+                        req.get("video", ""), float(req.get("start") or 0),
+                        float(req.get("end") or 0), req.get("headline", ""),
+                        req.get("body", ""), bool(req.get("native")))
+                    body = json.dumps({"text": text}).encode()
+                except Exception as exc:
+                    traceback.print_exc()
+                    body = json.dumps({"error": f"{type(exc).__name__}: {exc}"}).encode()
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/api/cancel":
             n = int(self.headers.get("Content-Length", 0))
             job = (json.loads(self.rfile.read(n) or b"{}") or {}).get("job", "")
@@ -425,6 +447,8 @@ class Handler(BaseHTTPRequestHandler):
                 q.put({"error": "No speech was found in that video."})
                 return
             q.put({"title": html.escape(res["title"]),
+                   "kind": res.get("kind", "gist"),
+                   "question": html.escape(res.get("question", "")),
                    # RAW markdown for the Next UI, which parses the ** markers itself to
                    # build real components. The pre-rendered HTML below is for the plain
                    # fallback page — sending only that made the React app find zero
@@ -435,7 +459,8 @@ class Handler(BaseHTTPRequestHandler):
                    "duration": res.get("duration", 0),
                    "cached": res.get("cached", False),
                    "sentences": res.get("sentences") or [],
-                   "images": res.get("images") or []})
+                   "images": res.get("images") or [],
+                   "expansions": res.get("expansions") or {}})
         except ytgist.TooLong as e:
             q.put({"error": html.escape(str(e))})
         except ytgist.Cancelled:

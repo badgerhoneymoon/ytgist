@@ -1,4 +1,4 @@
-import type { Frame, Gist, Sentence, StepImage, Takeaway } from "./types";
+import type { Answer, Cite, Frame, Gist, Sentence, StepImage, Takeaway } from "./types";
 
 /** The model returns text; the UI wants structure. Parsing here — rather than asking the
  *  model for JSON — keeps the prompt about WRITING WELL instead of about syntax, and a
@@ -18,6 +18,7 @@ export function parseGist(f: Frame, videoId: string): Gist {
   const tldr = tldrMatch ? tldrMatch[1].trim() : "";
 
   const images: (StepImage | null)[] = f.images ?? [];
+  const expansions = f.expansions ?? {};
   const takeaways: Takeaway[] = [];
   // Split on the bold headlines; everything until the next one is that takeaway's body.
   const parts = raw.split(/\*\*(.+?)\*\*/g);
@@ -60,6 +61,8 @@ export function parseGist(f: Frame, videoId: string): Gist {
       evidence: seconds === null ? "" : evidenceAt(sentences, seconds),
       // The engine builds this list by splitting the SAME "**" markers, so index i
       // of images is index i of takeaways.
+      expansion:
+        seconds !== null && String(seconds) in expansions ? expansions[String(seconds)] : null,
       image: images[(i - 1) / 2] ?? null,
     });
   }
@@ -95,4 +98,49 @@ export function fmt(seconds: number): string {
 function evidenceAt(sentences: Sentence[], seconds: number): string {
   const near = sentences.filter((s) => s.start >= seconds - 8 && s.start <= seconds + 22);
   return near.map((s) => s.text.trim()).join(" ").slice(0, 480);
+}
+
+
+/** An answer, split into paragraphs with its citations lifted out as links.
+ *
+ *  The engine has already verified every stamp against the transcript and rewritten it as
+ *  a markdown link, so anything still here points at a real moment. Splitting on that link
+ *  syntax — rather than matching the bare [MM:SS] — is what stops the URL leaking into the
+ *  prose, which is exactly the bug the takeaway parser had.
+ */
+export function parseAnswer(f: Frame): Answer {
+  return {
+    question: f.question ?? "",
+    paragraphs: parseCited(f.raw ?? f.markdown ?? ""),
+  };
+}
+
+/** Prose with verified [MM:SS] links, split into paragraphs with the citations lifted out.
+ *
+ *  Shared by answers and by step expansions. Rendering either as a plain string dumps the
+ *  raw markdown — "[55:43](https://youtu.be/XoSMi36OEIE?t=3343)" — into the middle of a
+ *  sentence, which is precisely how it shipped (Denis, 2026-08-08). Consuming the WHOLE
+ *  link, not just the [MM:SS], is what keeps the URL out of the text.
+ */
+export function parseCited(text: string): (string | Cite)[][] {
+  const raw = text.replace(/\r/g, "").replace(/\*\*/g, "").trim();
+  const linkRe = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]\(([^)]*)\)/g;
+
+  return raw
+    .split(/\n\s*\n/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((para) => {
+      const parts: (string | Cite)[] = [];
+      let last = 0;
+      for (const m of para.matchAll(linkRe)) {
+        const before = para.slice(last, m.index);
+        if (before) parts.push(before);
+        parts.push({ stamp: m[1], href: m[2] } as Cite);
+        last = (m.index ?? 0) + m[0].length;
+      }
+      const rest = para.slice(last);
+      if (rest) parts.push(rest);
+      return parts;
+    });
 }

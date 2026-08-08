@@ -70,7 +70,12 @@ for B in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
          "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" \
          "/Applications/Chromium.app/Contents/MacOS/Chromium"; do
   if [ -x "$B" ]; then
-    "$B" --app=http://127.0.0.1:3210 \
+    # arch -arm64 is NOT optional. Chrome's binary is universal, and launching it directly
+    # rather than through LaunchServices let macOS start the x86_64 slice under Rosetta —
+    # verified: our window reported LSArchitecture=x86_64 while the user's own Chrome
+    # reported arm64, and macOS warned about ending Intel support (2026-08-08). `open`
+    # picks the native slice for you; exec'ing the binary does not, so say it explicitly.
+    arch -arm64 "$B" --app=http://127.0.0.1:3210 \
          --user-data-dir="$PROFILE" \
          --no-first-run --no-default-browser-check \
          --window-size=1180,900 >/dev/null 2>&1 &

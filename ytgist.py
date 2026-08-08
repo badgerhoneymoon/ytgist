@@ -30,6 +30,7 @@ import gist_prompt
 import model_client
 import timing_log
 import youtube_ingest as yt
+from youtube_ingest import IngestError
 
 CACHE = os.path.expanduser("~/.cache/ytgist")
 TMP = os.path.join(CACHE, "tmp")
@@ -44,7 +45,7 @@ CACHE_V = 1
 #
 # These are ESTIMATES SHOWN TO A HUMAN, so they are tuned to run slightly long. An ETA
 # that expires while you are still waiting is worse than one you beat.
-RATE = {"download": 0.30, "transcribe": 0.65, "summarise": 4.2}
+RATE = {"download": 0.30, "transcribe": 0.65, "summarise": 4.2, "answer": 1.3}
 
 # THE HARD LIMIT. Beyond the largest context we will start, the only way to proceed is to
 # summarise the transcript in halves and merge — each half written blind to the other, so
@@ -73,7 +74,7 @@ def _refuse_if_too_long(minutes: float):
         )
 
 
-def estimate(minutes: float, cached: bool) -> dict:
+def estimate(minutes: float, cached: bool, ask: bool = False) -> dict:
     """Seconds per remaining phase for a video of this length.
 
     Built-in rates are the FLOOR, not the answer: whatever the timing log has measured on
@@ -84,13 +85,68 @@ def estimate(minutes: float, cached: bool) -> dict:
     rate.update({k: v for k, v in known.items() if k in RATE})
     load = known.get("model load", LOAD_BASE + LOAD_PER_MIN * minutes)
 
+    # Answering is dominated by PREFILL — reading the transcript — where summarising also
+    # pays to write seventeen steps. Same input, a fraction of the output.
+    work = ({"answer": rate["answer"] * minutes} if ask
+            else {"summarise": rate["summarise"] * minutes})
     if cached:
-        return {"model load": load, "summarise": rate["summarise"] * minutes}
+        return {"model load": load, **work}
     return {"read info": 2.0,
             "download": rate["download"] * minutes,
             "transcribe": rate["transcribe"] * minutes,
             "model load": load,
-            "summarise": rate["summarise"] * minutes}
+            **work}
+
+
+EXPAND_MAX = 8 * 60         # a step's span, capped — beyond this it stops being one point
+
+
+def save_expansion(vid, native, start, text):
+    """Keep an expansion with the summary it belongs to.
+
+    They lived only in the browser's memory, so a reload threw away work that cost ten
+    seconds of GPU each (Denis, 2026-08-08). Keyed by the step's start second, and stored
+    per LANGUAGE VARIANT — an English expansion does not belong to a Russian summary."""
+    saved = load_summary(vid, native)
+    if not saved:
+        return
+    saved.setdefault("expansions", {})[str(int(start))] = text
+    save_summary(vid, saved, native)
+
+
+def expand(vid, start, end, headline, body, native=False, log=print):
+    """More detail about ONE takeaway, from that takeaway's own span of the transcript.
+
+    Cheaper and safer than a free question: the window is fixed by the argument's own
+    structure, so there is nothing else in context to invent from. Returns "" when the
+    passage genuinely adds nothing, which the prompt is explicitly allowed to say."""
+    cached = load_cached(vid)
+    if not cached:
+        raise IngestError("missing", "That transcript is no longer cached.")
+    sentences = cached["sentences"]
+    end = min(end if end and end > start else start + 240, start + EXPAND_MAX)
+    window = [x for x in sentences if start - 5 <= x["start"] <= end]
+    if not window:
+        return ""
+
+    user = gist_prompt.EXPAND_USER.format(
+        headline=headline.strip(), body=body.strip(),
+        language=("Write in the same language as the passage." if native
+                  else "Write in English, even though the passage may be in another language."),
+        transcript=gist_prompt.format_transcript(window))
+
+    need = len(gist_prompt.EXPAND_SYSTEM + user) // 2 + 600
+    srv = model_client.Server.acquire(need_tokens=need, model=MODELS["dense"], log=log)
+    with srv:
+        out = srv.chat(gist_prompt.EXPAND_SYSTEM, user, max_tokens=600, temperature=0.25)
+    if "NOTHING FURTHER" in out.upper():
+        save_expansion(vid, native, start, "")   # "asked, and there is nothing" is an answer
+        return ""
+    text, dropped = gist_prompt.verify(out.strip(), sentences, vid)
+    if dropped:
+        log(f"  ({dropped} invented timestamp(s) removed from the expansion)")
+    save_expansion(vid, native, start, text)
+    return text
 
 
 class Cancelled(Exception):
@@ -306,7 +362,7 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None,
         log(f"→ cached transcript for {vid} ({len(cached['sentences'])} segments)")
         step("cached", 70, f"cached transcript, {len(cached['sentences'])} segments")
         _refuse_if_too_long(cached.get("duration", 0) / 60)
-        predicted = estimate(cached.get("duration", 0) / 60, True)
+        predicted = estimate(cached.get("duration", 0) / 60, True, bool(question))
         if progress:
             progress({"eta": predicted,
                       "video_minutes": round(cached.get("duration", 0) / 60)})
@@ -320,7 +376,7 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None,
         mins = info["duration"] / 60
         log(f"   {gist_prompt.sanitize(info['title'])}  ({mins:.0f} min)")
         _refuse_if_too_long(mins)
-        predicted = estimate(mins, False)
+        predicted = estimate(mins, False, bool(question))
         if progress:
             progress({"eta": predicted, "video_minutes": round(mins)})
         d = yt.temp_dir(TMP)
@@ -358,7 +414,8 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None,
                     "raw": saved["text"], "dropped": 0, "video_id": vid,
                     "timings": {}, "duration": meta.get("duration", 0),
                     "cached": True, "sentences": sentences, "from_saved": True,
-                    "images": saved.get("images") or []}
+                    "images": saved.get("images") or [],
+                    "expansions": saved.get("expansions") or {}}
         return 0
 
     transcript = gist_prompt.format_transcript(sentences)
@@ -368,7 +425,10 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None,
                 steps=gist_prompt.steps_for(meta.get("duration", 0) / 60)))
     user += gist_prompt.NATIVE_RULE if native else gist_prompt.ENGLISH_RULE
 
-    step("summarise", 75, "27B, one pass over the whole transcript")
+    if question:
+        step("answer", 75, "reading the transcript to answer you")
+    else:
+        step("summarise", 75, "27B, one pass over the whole transcript")
     log("→ summarising …")
     # Estimated BEFORE the server exists, because the server's own tokeniser is what we
     # would otherwise need to size it. Two chars per token is the Cyrillic rate measured
@@ -397,7 +457,7 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None,
                 f"will start holds {srv.ctx:,}. Refusing rather than summarising it in "
                 f"halves, which loses whatever connects the two."
             )
-        with phase("summarise"):
+        with phase("answer" if question else "summarise"):
             out = srv.chat(gist_prompt.system_for(native), user)
 
     step("done", 100, "")
@@ -435,10 +495,11 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None,
                            "img_v": IMG_V, "native": bool(native),
                            "duration": meta.get("duration", 0)})
     run.last = {"title": meta.get("title", ""), "markdown": text, "dropped": dropped,
+                "kind": "answer" if question else "gist", "question": question or "",
                 "video_id": vid, "timings": timings,
                 "duration": meta.get("duration", 0), "cached": was_cached,
                 "sentences": sentences,   # the UI shows the evidence behind each claim
-                "images": images}
+                "images": images, "expansions": {}}
     timing_log.record(meta.get("duration", 0) / 60, was_cached, srv_ctx, timings, native,
                       predicted=predicted)
     total = sum(timings.values())

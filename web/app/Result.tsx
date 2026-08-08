@@ -1,8 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { RefreshCw, RotateCcw } from "lucide-react";
+import { ChevronDown, Loader2, RefreshCw, RotateCcw } from "lucide-react";
 import type { Gist, Takeaway } from "./types";
+import { Cited } from "./Answer";
+import { parseCited } from "./parse";
 
 /** The reading surface.
  *
@@ -44,7 +46,15 @@ export default function Result({
 
       <ol className="col-span-full mt-13">
         {gist.takeaways.map((t, i) => (
-          <Step key={i} n={i + 1} t={t} videoId={gist.videoId} />
+          <Step
+            key={i}
+            n={i + 1}
+            t={t}
+            videoId={gist.videoId}
+            // The step's span is from its own timestamp to the NEXT one — the argument's
+            // own structure decides the window, not a guess about how much to read.
+            until={gist.takeaways[i + 1]?.seconds ?? null}
+          />
         ))}
       </ol>
 
@@ -150,11 +160,51 @@ const COLORS: Record<string, string> = {
   summarise: "#C2571A",
 };
 
-function Step({ n, t, videoId }: { n: number; t: Takeaway; videoId: string }) {
+const ENGINE = "http://127.0.0.1:8765";
+
+function Step({
+  n,
+  t,
+  videoId,
+  until,
+}: {
+  n: number;
+  t: Takeaway;
+  videoId: string;
+  until: number | null;
+}) {
   // OPEN BY DEFAULT (Denis, 2026-08-08). The evidence is the reason to trust the claim;
   // hiding it behind a click made the summary something you take on faith, which is the
   // opposite of the point. Collapsing stays available for when you just want the spine.
   const [open, setOpen] = useState(true);
+
+  // MORE DETAIL, on demand, from this step's own passage. A takeaway is deliberately three
+  // short sentences; sometimes you want the number, the name or the exception it dropped.
+  // "" means asked-and-there-is-nothing, which is a real answer the model is allowed to
+  // give — the alternative is padding, and padding here is invention.
+  const [more, setMore] = useState<string | null>(t.expansion);
+  const [loading, setLoading] = useState(false);
+
+  const expand = async () => {
+    if (loading || more !== null || t.seconds === null) return;
+    setLoading(true);
+    try {
+      const r = await fetch(`${ENGINE}/api/expand`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          video: videoId, start: t.seconds, end: until,
+          headline: t.headline, body: t.body,
+        }),
+      });
+      const d = await r.json();
+      setMore(d.error ? `` : (d.text ?? ""));
+    } catch {
+      setMore("");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <li className="group mb-13 grid grid-cols-[3.75rem_minmax(0,1fr)] last:mb-0
@@ -214,21 +264,70 @@ function Step({ n, t, videoId }: { n: number; t: Takeaway; videoId: string }) {
           {t.body}
         </p>
 
+        {/* ONE ACTION ROW. These were stacked — two identical uppercase micro-labels,
+            "MORE DETAIL" directly above "HIDE SOURCE" — which read as a pile of section
+            headings rather than two things you can press (Denis, 2026-08-08). They are
+            both actions on this step, so they sit on one line and are told apart by what
+            they do: expanding ADDS text and gets the accent; the quote toggle only hides
+            something already on screen and stays quiet. */}
+        {(t.seconds !== null || t.evidence) && (
+          <div className="mt-3.5 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            {t.seconds !== null && more === null && (
+              <button
+                onClick={expand}
+                disabled={loading}
+                className="group/exp flex items-center gap-1.5 rounded-full border border-accent/25
+                           bg-accent/[0.06] px-2.5 py-1 text-[11.5px] font-semibold text-accent
+                           transition-colors duration-150 hover:bg-accent/[0.13]
+                           disabled:opacity-60 focus-visible:outline-2
+                           focus-visible:outline-offset-2 focus-visible:outline-accent"
+              >
+                {loading ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <ChevronDown
+                    size={12}
+                    strokeWidth={2.5}
+                    className="transition-transform duration-200 group-hover/exp:translate-y-[1px]"
+                  />
+                )}
+                {loading ? "reading the passage…" : "More detail"}
+              </button>
+            )}
+
+            {t.evidence && (
+              <button
+                onClick={() => setOpen((v) => !v)}
+                aria-expanded={open}
+                className="text-[12.5px] text-soft transition-colors duration-150 hover:text-ink
+                           focus-visible:outline-2 focus-visible:outline-offset-2
+                           focus-visible:outline-accent"
+              >
+                {open ? "hide the quote" : "what was said"}
+              </button>
+            )}
+          </div>
+        )}
+
+        {more !== null &&
+          (more ? (
+            <div
+              className="mt-3.5 border-l-2 border-accent/30 pl-4"
+              style={{ animation: "rise .35s var(--ease-out-expo)" }}
+            >
+              <Cited paragraphs={parseCited(more)} className="text-[17px]" />
+            </div>
+          ) : (
+            <p className="mt-2.5 text-[12.5px] text-soft/80">
+              nothing further in this passage — the summary already has it
+            </p>
+          ))}
+
         {t.evidence && (
           /* clear-right so a floated image narrows the BODY (where wrapping reads as
              intentional) but never the quote, whose ragged right edge against a
              half-width block just looks broken. */
           <div className="clear-right">
-            <button
-              onClick={() => setOpen((v) => !v)}
-              aria-expanded={open}
-              className="mt-3 text-[11.5px] font-semibold uppercase tracking-[0.08em] text-soft
-                         transition-colors duration-150 hover:text-ink
-                         focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-            >
-              {open ? "hide source" : "what was said"}
-            </button>
-
             {/* The grid-rows 0fr→1fr trick animates to CONTENT HEIGHT without measuring
                 it — no max-height guess that clips long quotes or lags on short ones. */}
             <div

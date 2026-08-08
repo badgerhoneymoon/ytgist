@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import type { Frame, Gist, Stage } from "./types";
-import { parseGist } from "./parse";
+import type { Answer as AnswerT, Frame, Gist, Stage } from "./types";
+import { parseAnswer, parseGist } from "./parse";
+import Answer from "./Answer";
 import History from "./History";
 import Preview from "./Preview";
 import Progress from "./Progress";
@@ -42,6 +43,9 @@ export default function Home() {
   const [pct, setPct] = useState(0);
   const [msg, setMsg] = useState("");
   const [gist, setGist] = useState<Gist | null>(null);
+  // Answers STACK and never displace the summary — asking a follow-up should not cost you
+  // the thing you were reading. Newest first, because that is the one you just asked for.
+  const [answers, setAnswers] = useState<AnswerT[]>([]);
   const [error, setError] = useState("");
   const busy = stage !== null;
 
@@ -72,6 +76,7 @@ export default function Home() {
     setPct(0);
     setMsg("");
     setGist(null);
+    setAnswers([]);
     setError("");
     setUrl("");
     setQuestion("");
@@ -95,7 +100,10 @@ export default function Home() {
     ) => {
       const target = (urlOverride ?? url).trim();
       if (!target || busy) return;
-      setGist(null);
+      if (!ask) {
+        setGist(null);
+        setAnswers([]);       // a new gist is a new subject; old answers are about the old one
+      }
       setError("");
       setPct(0);
       setStage("check");
@@ -155,9 +163,13 @@ export default function Home() {
         }
         if (f.stopped) done();
         if (f.markdown !== undefined) {
-          const id = parseYouTube(target) ?? target.match(YT_ID)?.[1] ?? "";
-          setGist(parseGist(f, id));
-          setLibKey((k) => k + 1);
+          if (f.kind === "answer") {
+            setAnswers((a) => [{ ...parseAnswer(f), question: ask }, ...a]);
+          } else {
+            const id = parseYouTube(target) ?? target.match(YT_ID)?.[1] ?? "";
+            setGist(parseGist(f, id));
+            setLibKey((k) => k + 1);
+          }
           done();
         }
       };
@@ -346,6 +358,10 @@ export default function Home() {
           {error}
         </p>
       )}
+
+      {answers.map((a, i) => (
+        <Answer key={answers.length - i} answer={a} />
+      ))}
 
       {gist && (
         <Result
