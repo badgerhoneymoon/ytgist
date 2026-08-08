@@ -237,11 +237,37 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass                                        # the page is the log
 
+    # CORS for the Next dev origin. The UI talks to this engine DIRECTLY rather than
+    # through Next's rewrite, because that rewrite BUFFERS server-sent events: the job
+    # ran to completion server-side while the page sat on "starting…" forever, since not
+    # one frame reached the browser (proven 2026-08-08 — curl direct streamed instantly,
+    # curl through :3210 returned nothing). Streaming and proxies are a known bad pair;
+    # the fix is to stop proxying the stream.
+    def _cors(self):
+        origin = self.headers.get("Origin", "")
+        if origin in ("http://127.0.0.1:3210", "http://localhost:3210"):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors()
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.end_headers()
+
     def do_GET(self):
         if self.path == "/":
             body = PAGE.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path.startswith("/api/history"):
+            body = json.dumps(ytgist.history()).encode()
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -268,6 +294,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return self.send_error(502)
         self.send_response(200)
+        self._cors()
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -281,8 +308,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         self.send_response(200)
+        self._cors()
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
         while True:
             ev = q.get()
@@ -306,6 +335,7 @@ class Handler(BaseHTTPRequestHandler):
         threading.Thread(target=self._work, args=(q, req), daemon=True).start()
         body = json.dumps({"job": job}).encode()
         self.send_response(200)
+        self._cors()
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -315,12 +345,18 @@ class Handler(BaseHTTPRequestHandler):
     def _work(q, req):
         try:
             ytgist.run(req.get("url", ""), req.get("ask") or None,
-                       req.get("model", "dense"), progress=q.put)
+                       req.get("model", "dense"),
+                       refresh=bool(req.get("refresh")), progress=q.put)
             res = getattr(ytgist.run, "last", None)
             if not res:
                 q.put({"error": "No speech was found in that video."})
                 return
             q.put({"title": html.escape(res["title"]),
+                   # RAW markdown for the Next UI, which parses the ** markers itself to
+                   # build real components. The pre-rendered HTML below is for the plain
+                   # fallback page — sending only that made the React app find zero
+                   # takeaways, because _render had already replaced every ** with <b>.
+                   "raw": res["markdown"],
                    "markdown": _render(res["markdown"], res.get("sentences") or []),
                    "timings": res.get("timings", {}),
                    "duration": res.get("duration", 0),

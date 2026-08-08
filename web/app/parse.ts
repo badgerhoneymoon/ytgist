@@ -10,7 +10,8 @@ import type { Frame, Gist, Sentence, Takeaway } from "./types";
  *      One sentence of substance.
  */
 export function parseGist(f: Frame, videoId: string): Gist {
-  const raw = (f.markdown ?? "").replace(/\r/g, "");
+  // Prefer the unrendered text: f.markdown has already had ** turned into <b>.
+  const raw = (f.raw ?? f.markdown ?? "").replace(/\r/g, "");
   const sentences: Sentence[] = f.sentences ?? [];
 
   const tldrMatch = raw.match(/^\s*TL;?DR[:\s]*(.+)$/im);
@@ -23,15 +24,25 @@ export function parseGist(f: Frame, videoId: string): Gist {
     const headlineRaw = parts[i].trim();
     const after = (parts[i + 1] ?? "").trim();
 
-    // The timestamp may sit at the end of the headline or the start of the body.
+    // The timestamp arrives as a full markdown LINK — [02:49](https://youtu.be/…?t=169) —
+    // because the engine verifies each stamp and rewrites it. Matching only the [02:49]
+    // part left the "(https://youtu.be/…)" stranded in the middle of the sentence, which
+    // is exactly what shipped. Consume the whole link, keep the label.
+    const linkRe = /\[(\d{1,2}:\d{2}(?::\d{2})?)\]\([^)]*\)/;
     const stampRe = /\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?/;
-    const fromHead = headlineRaw.match(stampRe);
-    const fromBody = after.slice(0, 14).match(stampRe);
+    const fromHead = headlineRaw.match(linkRe) ?? headlineRaw.match(stampRe);
+    const fromBody = after.slice(0, 60).match(linkRe) ?? after.slice(0, 14).match(stampRe);
     const stamp = fromHead?.[1] ?? fromBody?.[1] ?? null;
 
-    const headline = headlineRaw.replace(stampRe, "").replace(/[\[\]]/g, "").trim();
+    const headline = headlineRaw
+      .replace(linkRe, "")
+      .replace(stampRe, "")
+      .replace(/[\[\]]/g, "")
+      .trim();
     const body = after
+      .replace(linkRe, "")                       // link first — it contains a stamp
       .replace(/^\s*\[?\d{1,2}:\d{2}(?::\d{2})?\]?\s*/, "")
+      .replace(/^\s*\(https?:\/\/[^)]*\)\s*/, "")   // any stray bare URL remnant
       .split(/\n\s*\n/)[0]
       .split("\n")
       .map((l) => l.trim())

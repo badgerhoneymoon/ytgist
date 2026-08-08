@@ -18,6 +18,7 @@ through parakeet-mlx's PUBLIC from_pretrained. Same model, no coupling, and Myna
 import argparse
 import json
 import os
+import glob
 import shutil
 import signal
 import sys
@@ -33,6 +34,7 @@ TMP = os.path.join(CACHE, "tmp")
 PARAKEET = "mlx-community/parakeet-tdt-0.6b-v3"     # multilingual: YouTube isn't English-only
 CHUNK, OVERLAP = 120.0, 15.0
 CACHE_V = 1
+GIST_V = 2          # bump when the PROMPT changes, so old summaries are re-made
 
 MODELS = {
     "dense": os.path.expanduser("~/models/Qwen3.6-27B-UD-Q5_K_XL.gguf"),
@@ -82,6 +84,52 @@ def save_cached(vid, payload):
     with open(tmp, "w") as f:
         json.dump(payload, f)
     os.replace(tmp, _cache_path(vid))
+
+
+def gist_path(vid):
+    return os.path.join(CACHE, f"{vid}.gist.json")
+
+
+def load_summary(vid):
+    """A saved summary, if it was made by the CURRENT prompt. Kept in its own file so a
+    transcript and its summary can be invalidated independently — the transcript is
+    expensive and rarely stale; the summary is cheap and changes whenever the prompt does."""
+    try:
+        with open(gist_path(vid), encoding="utf-8") as f:
+            d = json.load(f)
+        return d if d.get("gist_v") == GIST_V else None
+    except (OSError, ValueError):
+        return None
+
+
+def save_summary(vid, payload):
+    os.makedirs(CACHE, exist_ok=True)
+    tmp = gist_path(vid) + f".{os.getpid()}.part"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    os.replace(tmp, gist_path(vid))
+
+
+def history():
+    """Every video we have, newest first — transcript always, summary when we made one."""
+    out = []
+    for f in glob.glob(os.path.join(CACHE, "*.json")):
+        if f.endswith(".gist.json"):
+            continue
+        vid = os.path.basename(f)[:-5]
+        try:
+            with open(f, encoding="utf-8") as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        g = load_summary(vid)
+        out.append({"id": vid, "title": d.get("title", vid),
+                    "duration": d.get("duration", 0),
+                    "segments": len(d.get("sentences", [])),
+                    "has_summary": bool(g),
+                    "at": (g or {}).get("at") or os.path.getmtime(f)})
+    out.sort(key=lambda r: r["at"], reverse=True)
+    return out
 
 
 def transcribe(wav_path):
@@ -171,6 +219,16 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None):
         log("✗ no speech found in that video.")
         return 1
 
+    saved = None if (refresh or question) else load_summary(vid)
+    if saved:
+        step("done", 100, "")
+        log("  using the saved summary (regenerate to make a new one)")
+        run.last = {"title": meta.get("title", ""), "markdown": saved["text"],
+                    "raw": saved["text"], "dropped": 0, "video_id": vid,
+                    "timings": {}, "duration": meta.get("duration", 0),
+                    "cached": True, "sentences": sentences, "from_saved": True}
+        return 0
+
     transcript = gist_prompt.format_transcript(sentences)
     user = (gist_prompt.ASK_USER.format(question=question, transcript=transcript)
             if question else gist_prompt.GIST_USER.format(transcript=transcript))
@@ -205,6 +263,10 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None):
     print(gist_prompt.sanitize(text))
     if dropped:
         log(f"\n  ({dropped} invented timestamp(s) removed — the text was kept)")
+    if not question:
+        save_summary(vid, {"gist_v": GIST_V, "text": text, "at": time.time(),
+                           "title": meta.get("title", ""),
+                           "duration": meta.get("duration", 0)})
     run.last = {"title": meta.get("title", ""), "markdown": text, "dropped": dropped,
                 "video_id": vid, "timings": timings,
                 "duration": meta.get("duration", 0), "cached": was_cached,

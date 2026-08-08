@@ -14,6 +14,7 @@ export type Frame = {
   // final frame only
   title?: string;
   markdown?: string;
+  raw?: string;          // unrendered — what the UI parses
   timings?: Record<string, number>;
   duration?: number;
   cached?: boolean;

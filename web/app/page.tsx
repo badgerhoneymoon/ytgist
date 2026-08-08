@@ -3,9 +3,15 @@
 import { useCallback, useRef, useState } from "react";
 import type { Frame, Gist, Stage } from "./types";
 import { parseGist } from "./parse";
+import History from "./History";
 import Preview from "./Preview";
 import Progress from "./Progress";
 import Result from "./Result";
+
+// DIRECT to the engine, NOT through Next's rewrite: the rewrite buffers server-sent
+// events, so a job would finish server-side while the page waited forever without
+// receiving a single frame.
+const ENGINE = "http://127.0.0.1:8765";
 
 const YT_ID = /(?:v=|youtu\.be\/|\/shorts\/|\/embed\/|\/live\/)([A-Za-z0-9_-]{11})/;
 const YT_HOSTS = /^(www\.|m\.|music\.)?(youtube\.com|youtu\.be|youtube-nocookie\.com)$/;
@@ -41,9 +47,10 @@ export default function Home() {
   const videoId = parseYouTube(url);
   const badLink = url.trim().length > 0 && !videoId;
   const esRef = useRef<EventSource | null>(null);
+  const [libKey, setLibKey] = useState(0);   // bumped after a run so the library refreshes
 
   const start = useCallback(
-    async (ask: string) => {
+    async (ask: string, refresh = false) => {
       if (!url.trim() || busy) return;
       setGist(null);
       setError("");
@@ -51,14 +58,14 @@ export default function Home() {
       setStage("check");
       setMsg(ask ? "answering your question" : "starting");
 
-      const res = await fetch("/api/gist", {
+      const res = await fetch(`${ENGINE}/api/gist`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, ask }),
+        body: JSON.stringify({ url, ask, refresh }),
       });
       const { job } = await res.json();
 
-      const es = new EventSource(`/api/events?job=${job}`);
+      const es = new EventSource(`${ENGINE}/api/events?job=${job}`);
       esRef.current = es;
       let watchdog: ReturnType<typeof setTimeout>;
       const done = () => {
@@ -93,6 +100,7 @@ export default function Home() {
         if (f.markdown !== undefined) {
           const id = parseYouTube(url) ?? url.match(YT_ID)?.[1] ?? "";
           setGist(parseGist(f, id));
+          setLibKey((k) => k + 1);
           done();
         }
       };
@@ -109,12 +117,17 @@ export default function Home() {
   );
 
   return (
-    <main className="mx-auto max-w-3xl px-6 py-16">
+    <main
+      className="mx-auto grid w-full max-w-[54rem] px-8 pb-28 pt-16
+                 [grid-template-columns:3.75rem_minmax(0,1fr)]
+                 max-sm:[grid-template-columns:minmax(0,1fr)] max-sm:px-5
+                 [&>*]:col-start-2 max-sm:[&>*]:col-start-1"
+    >
       <header className="mb-10">
-        <h1 className="text-[13px] font-semibold uppercase tracking-[0.18em] text-soft">
+        <h1 className="text-[12px] font-semibold uppercase tracking-[0.16em] text-soft">
           ytgist
         </h1>
-        <p className="mt-2 text-[15px] text-soft">
+        <p className="mt-2 text-[15px] leading-[1.45] text-soft">
           Paste a link. Get the argument, not a wall of text.
         </p>
       </header>
@@ -134,15 +147,20 @@ export default function Home() {
           autoFocus
           placeholder="https://youtube.com/watch?v=…"
           className="flex-1 rounded-xl border border-line bg-transparent px-4 py-3 text-[15px]
-                     outline-none transition placeholder:text-soft/70
-                     focus:border-accent focus:ring-2 focus:ring-accent/20"
+                     outline-none transition-[border-color,box-shadow] duration-150
+                     placeholder:text-soft/60 hover:border-line
+                     focus:border-accent focus:shadow-[0_0_0_3px_rgba(194,87,26,0.14)]"
+          style={{ transitionTimingFunction: "var(--ease-out-expo)" }}
         />
         <button
           disabled={busy || !videoId}
           title={!videoId ? "paste a YouTube link first" : undefined}
           className="rounded-xl bg-ink px-6 py-3 text-[15px] font-semibold text-canvas
-                     transition-[transform,opacity] duration-200 active:scale-[0.98]
-                     disabled:cursor-not-allowed disabled:opacity-30"
+                     transition-[transform,opacity,box-shadow] duration-150
+                     hover:shadow-[0_2px_10px_rgba(34,30,26,0.18)] active:scale-[0.985]
+                     disabled:cursor-not-allowed disabled:opacity-25 disabled:shadow-none
+                     focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          style={{ transitionTimingFunction: "var(--ease-out-expo)" }}
         >
           Gist
         </button>
@@ -168,15 +186,19 @@ export default function Home() {
           }}
           placeholder="…or ask something about it"
           className="flex-1 rounded-xl border border-line bg-transparent px-4 py-3 text-[15px]
-                     outline-none transition placeholder:text-soft/70
-                     focus:border-accent focus:ring-2 focus:ring-accent/20"
+                     outline-none transition-[border-color,box-shadow] duration-150
+                     placeholder:text-soft/60
+                     focus:border-accent focus:shadow-[0_0_0_3px_rgba(194,87,26,0.14)]"
+          style={{ transitionTimingFunction: "var(--ease-out-expo)" }}
         />
         <button
           type="button"
           onClick={() => start(question.trim())}
           disabled={busy || !videoId || !question.trim()}
           className="rounded-xl border border-line px-6 py-3 text-[15px] font-semibold
-                     transition hover:border-ink active:scale-[0.98] disabled:opacity-40"
+                     transition-[border-color,transform] duration-150 hover:border-ink
+                     active:scale-[0.985] disabled:opacity-30
+                     focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
         >
           Ask
         </button>
@@ -190,7 +212,14 @@ export default function Home() {
         </p>
       )}
 
-      {gist && <Result gist={gist} onRegenerate={() => start("")} />}
+      {gist && <Result gist={gist} onRegenerate={() => start("", true)} />}
+
+      {!busy && !gist && (
+        <History
+          refreshKey={libKey}
+          onPick={(id) => setUrl(`https://www.youtube.com/watch?v=${id}`)}
+        />
+      )}
     </main>
   );
 }

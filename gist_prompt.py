@@ -52,8 +52,13 @@ Someone reading the sentences should understand WHY each step follows.
 
 Put the [MM:SS] at the end of the headline line, copied exactly from the transcript.
 
-Open with one line before step 1:
-TL;DR <one sentence — what the speaker is actually arguing>
+Open with a TL;DR before step 1 — and apply the SAME sentence rule to it. The steps got
+short sentences while the TL;DR stayed one clause-chained monster, which reads as a wall
+however short it is (Denis, 2026-08-08):
+
+TL;DR <2-3 sentences. Each under 16 words. One idea per sentence. First sentence: what
+the speaker argues. Then: what it rests on, or what follows from it. No "and that…",
+no "which…", no stacked commas.>
 
 TRANSCRIPT
 <<<

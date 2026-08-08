@@ -19,7 +19,7 @@ export default function Preview({ videoId }: { videoId: string }) {
       return;
     }
     let alive = true;
-    fetch(`/api/oembed?v=${videoId}`)
+    fetch(`http://127.0.0.1:8765/api/oembed?v=${videoId}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (alive && d?.title) {

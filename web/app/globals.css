@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* The palette is Myna's — same maker, same hand. Warm ink on parchment, one accent. */
+/* Palette is Myna's — same maker, same hand. Warm ink on parchment, one accent. */
 @theme {
   --color-canvas: #FBFAF7;
   --color-ink: #221E1A;
@@ -9,10 +9,53 @@
   --color-line: #E6E1D8;
   --color-accent: #C2571A;
   --color-good: #3F7D5A;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+               Arial, sans-serif;
+  --font-serif: var(--font-serif), Georgia, "Times New Roman", serif;
+
+  /* One easing everywhere: a fast start that decelerates reads as responsive, where a
+     linear or ease-in curve reads as sluggish. Durations are short on purpose —
+     anything over ~300ms on a UI element starts to feel like waiting. */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* LIGHT ONLY (Denis, 2026-08-08: "fuck the dark mode"). color-scheme:light also stops
-   the browser auto-darkening form controls, which is what makes a light-only page look
-   half-broken on a Mac in dark mode. */
+/* LIGHT ONLY (Denis: "fuck the dark mode"). color-scheme also stops the browser
+   auto-darkening form controls, which is what makes a light-only page look half-broken
+   on a Mac set to dark. */
 html { color-scheme: light; }
-html, body { background: var(--color-canvas); color: var(--color-ink); }
+
+html, body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+/* Numerals that get COMPARED — step numbers, timestamps, seconds — must line up
+   column-wise, so "9." and "10." share a right edge. Running prose must NOT be tabular
+   or the word spacing goes gappy, hence the re-enable below. */
+main { font-variant-numeric: tabular-nums; }
+.prose-serif { font-variant-numeric: proportional-nums; }
+
+/* Russian compounds overflow a 596px column and browsers have no reliable ru
+   hyphenation dictionary — so break the word rather than the layout. */
+h1, h2, h3 { overflow-wrap: break-word; hyphens: none; }
+h2, h3 { text-wrap: balance; }
+p { text-wrap: pretty; }
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes shimmer {
+  100% { transform: translateX(100%); }
+}
+
+/* Motion is a courtesy, not a requirement. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
