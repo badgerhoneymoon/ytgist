@@ -31,6 +31,15 @@ html, body {
   font-family: var(--font-sans);
 }
 
+/* Tailwind v4 changed this: its preflight sets `cursor: default` on buttons, where v3
+   left the browser's pointer. Every control in this app is a <button>, so the whole UI
+   silently stopped signalling that it was clickable (Denis: "why I don't see the cursor
+   changing"). Anchors keep the browser default; this only restores buttons. */
+button:not(:disabled), [role="button"]:not([aria-disabled="true"]), label:has(input[type="checkbox"]) {
+  cursor: pointer;
+}
+button:disabled { cursor: not-allowed; }
+
 /* Numerals that get COMPARED — step numbers, timestamps, seconds — must line up
    column-wise, so "9." and "10." share a right edge. Running prose must NOT be tabular
    or the word spacing goes gappy, hence the re-enable below. */
@@ -46,6 +55,11 @@ p { text-wrap: pretty; }
 @keyframes rise {
   from { opacity: 0; transform: translateY(10px); }
   to   { opacity: 1; transform: none; }
+}
+/* The indeterminate state: motion without a position, for when the estimate has expired
+   and the app genuinely does not know how much is left. */
+@keyframes drift {
+  to { background-position: 20px 0; }
 }
 @keyframes shimmer {
   100% { transform: translateX(100%); }

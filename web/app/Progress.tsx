@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { X } from "lucide-react";
 import type { Stage } from "./types";
 
 /** ONE segmented track, not a bar plus a row of pills.
@@ -15,86 +16,194 @@ import type { Stage } from "./types";
  *  Weights are MEASURED (ytgist.py): read info ~1s, download ~8s, transcribe ~10s,
  *  summarise ~40s.
  */
+/** Seconds this run will spend in a stage, from the engine's own estimate. "model load"
+ *  is folded into summarising: it is part of the same wait, and a 6-second sliver is not
+ *  a stage worth drawing. */
+function secsOf(eta: Record<string, number>, key: Stage): number {
+  if (key === "check") return eta["read info"] ?? 0;
+  if (key === "summarise") return (eta["summarise"] ?? 0) + (eta["model load"] ?? 0);
+  return eta[key] ?? 0;
+}
+
 const STEPS: { key: Stage; label: string; weight: number; secs: number }[] = [
   { key: "check", label: "reading video info", weight: 1, secs: 2 },
   { key: "download", label: "downloading audio", weight: 8, secs: 10 },
   { key: "transcribe", label: "transcribing", weight: 10, secs: 12 },
   { key: "summarise", label: "summarising", weight: 40, secs: 45 },
 ];
-const TOTAL = STEPS.reduce((a, s) => a + s.weight, 0);
 
 export default function Progress({
   stage,
   msg,
+  eta,
+  onCancel,
 }: {
   stage: Stage | null;
   pct: number;
   msg: string;
+  eta: Record<string, number> | null;
+  onCancel: () => void;
 }) {
-  const i = STEPS.findIndex((s) => s.key === stage);
-  // How far INTO the current stage we are, 0→1. Summarising emits no intermediate signal
-  // for ~40s, so a literal bar would freeze and read as a hang. This eases toward the end
-  // of the current segment without ever completing it: the segment boundary is real, only
-  // the motion inside it is estimated, and the next real frame always wins.
-  const [within, setWithin] = useState(0);
+  // WHICH STAGES WILL ACTUALLY RUN. A cached transcript skips download and transcription
+  // entirely, and the bar used to draw them anyway as near-zero ghosts — three slivers
+  // representing work that is not happening (Denis: "it's squeezed the first steps…
+  // I would not do this"). The ETA is the authority: a phase it does not mention is a
+  // phase this run will not perform.
+  const steps = eta
+    ? STEPS.filter((s) => secsOf(eta, s.key) > 0)
+    : STEPS;
+  const secs = steps.map((s) => (eta ? secsOf(eta, s.key) : s.secs));
+  const totalEta = eta ? secs.reduce((a, b) => a + b, 0) : 0;
 
+  // Widths are proportional but FLOORED. Pure proportion breaks down the moment one stage
+  // is 95% of the work: every other segment shrinks below the width of its own border and
+  // the bar stops reading as a sequence at all.
+  const floor = totalEta ? totalEta * 0.12 : 0;
+  const weights = secs.map((v) => Math.max(v, floor));
+
+  const done = stage === "done";
+  const i = done ? steps.length : steps.findIndex((s) => s.key === stage);
+
+  // ONE clock, 0.2s resolution, running for the life of the component. The stage anchor
+  // is stamped from inside the same tick — reading a ref during render is forbidden, and
+  // a ref read inside an interval callback is not, so the current stage travels there.
+  const iRef = useRef(i);
   useEffect(() => {
-    setWithin(0);
-    if (i < 0) return;
+    iRef.current = i;
+  }, [i]);
+
+  const [now, setNow] = useState(0);
+  const [mark, setMark] = useState({ i: -1, at: 0 });
+  useEffect(() => {
+    const t0 = performance.now();
     const id = setInterval(() => {
-      setWithin((w) => w + (0.97 - w) * (0.3 / STEPS[i].secs));
+      const t = (performance.now() - t0) / 1000;
+      setNow(t);
+      setMark((m) => (m.i === iRef.current ? m : { i: iRef.current, at: t }));
     }, 200);
     return () => clearInterval(id);
-  }, [i]);
+  }, []);
+
+  // ANCHORED TO THE REAL STAGE CHANGE, not to a position on the total timeline.
+  //
+  // The fill used to be `elapsed - (estimated seconds of every earlier stage)`. When the
+  // earlier stages ran FASTER than predicted, that difference was negative and the current
+  // segment sat stubbornly empty while the countdown ticked down beside it (Denis: "why is
+  // the progress not seen for that stage?"). The stage change is a real event and the
+  // estimate is not, so the real event is what the clock should hang from.
+  const inStage = mark.i === i ? Math.max(0, now - mark.at) : 0;
+
+  // Remaining = what is left of THIS stage, plus the estimates for the ones after it.
+  const tail = totalEta ? secs.slice(i + 1).reduce((a, b) => a + b, 0) : 0;
+  const thisLeft = totalEta && i >= 0 ? Math.max(0, secs[i] - inStage) : 0;
+  const remaining = thisLeft + tail;
+  const over = totalEta > 0 && i >= 0 && inStage > secs[i];
+
+  // FALLBACK, for the seconds before the engine reports the video's length and there is
+  // no estimate at all: an easing curve that decelerates and never completes. It is a
+  // guess, and it is only ever on screen while we have nothing better.
+  const [prog, setProg] = useState({ i: -1, w: 0 });
+  useEffect(() => {
+    if (totalEta || i < 0 || i >= steps.length) return;
+    const id = setInterval(() => {
+      setProg((p) => {
+        const w = p.i === i ? p.w : 0;
+        return { i, w: w + (0.97 - w) * (0.3 / Math.max(secs[i], 1)) };
+      });
+    }, 200);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [i, totalEta]);
+
+  /** How full segment n should be, 0→1. A REPORTED stage always wins over the clock:
+   *  real signal beats estimate, so a stage the engine has already left is finished no
+   *  matter what the arithmetic says. */
+  const fillOf = (n: number) => {
+    if (done) return 1;
+    if (n < i) return 1;
+    if (n > i) return 0;
+    if (!totalEta) return prog.i === i ? prog.w : 0;
+    return Math.min(inStage / Math.max(secs[n], 1), 0.985);
+  };
 
   return (
     <div className="mt-10">
       <div className="flex gap-1" aria-label="progress">
-        {STEPS.map((s, n) => {
-          const done = n < i;
-          const now = n === i;
-          const fill = done ? 1 : now ? within : 0;
+        {steps.map((s, n) => {
+          const fill = fillOf(n);
           return (
             <div
               key={s.key}
               className="h-1.5 overflow-hidden rounded-full bg-line/70"
-              style={{ flex: s.weight }}
+              style={{ flex: weights[n] }}
             >
-              <div
-                className="h-full rounded-full"
-                style={{
-                  width: `${fill * 100}%`,
-                  background: done ? "var(--color-good)" : "var(--color-accent)",
-                  transition: "width 500ms var(--ease-out-expo), background 300ms",
-                }}
-              />
+              {over && n === i ? (
+                <div
+                  className="h-full w-full rounded-full opacity-70"
+                  style={{
+                    background:
+                      "repeating-linear-gradient(115deg, var(--color-accent) 0 10px, " +
+                      "color-mix(in srgb, var(--color-accent) 45%, transparent) 10px 20px)",
+                    animation: "drift 900ms linear infinite",
+                  }}
+                />
+              ) : (
+                <div
+                  className="h-full rounded-full"
+                  style={{
+                    width: `${fill * 100}%`,
+                    background: fill >= 1 ? "var(--color-good)" : "var(--color-accent)",
+                    transition: "width 500ms var(--ease-out-expo), background 300ms",
+                  }}
+                />
+              )}
             </div>
           );
         })}
       </div>
 
-      {/* Labels sit under their own segment, so the width IS the cost. Only the running
-          one is emphasised — done stages recede rather than shouting a green tick. */}
-      <div className="mt-2.5 flex gap-1">
-        {STEPS.map((s, n) => (
-          <div key={s.key} style={{ flex: s.weight }} className="min-w-0">
-            <span
-              className={[
-                "block truncate text-[12px] transition-colors duration-300",
-                n < i ? "text-soft/50" : "",
-                n === i ? "font-semibold text-accent" : "",
-                n > i ? "text-soft/35" : "",
-              ].join(" ")}
-            >
-              {s.label}
-            </span>
-          </div>
-        ))}
+      {/* ONE line of text, not a label per segment. A 2-second stage gets a 2%-wide
+          segment, so a label under it can only ever be "r…" — proportional widths and
+          per-segment labels are fundamentally incompatible (Denis: "truncated, it's
+          ugly"). The bar already carries the proportions; the words only need to say
+          what is happening NOW. */}
+      <div className="mt-3 flex items-baseline justify-between gap-4">
+        <p className="min-w-0 truncate text-[14px]">
+          {/* "done" is a real stage the engine sends just before the result frame. It is
+              not in this list, so it used to read as index -1 — blanking the whole bar and
+              relabelling it "starting" at the exact moment the run succeeded. */}
+          <span className="font-semibold text-accent">
+            {done ? "finishing" : (steps[i]?.label ?? "starting")}
+          </span>
+          {msg && <span className="text-soft"> · {msg}</span>}
+        </p>
+        <span className="flex shrink-0 items-center gap-2.5 text-[12.5px] tabular-nums text-soft/70">
+          {done
+            ? "done"
+            : over
+              ? `over estimate · ${clock(now)}`
+              : totalEta > 0
+                ? left(remaining)
+                : clock(now)}
+          {/* Stop matters most on the longest runs, which is exactly when the page looks
+              most stuck. It tells the ENGINE to stop, not just this tab — otherwise the
+              run keeps the model locked and the next one queues behind work nobody
+              wants (Denis, 2026-08-08). */}
+          <button
+            onClick={onCancel}
+            title="stop this run"
+            className="flex items-center gap-1 rounded-full border border-line px-2 py-0.5
+                       text-[11.5px] font-medium text-soft transition-colors duration-150
+                       hover:border-red-300 hover:bg-red-50 hover:text-red-700
+                       focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            <X size={11} strokeWidth={2.5} />
+            Stop
+          </button>
+        </span>
       </div>
 
-      {msg && <p className="mt-4 text-[14px] text-soft">{msg}…</p>}
-
-      {stage === "summarise" && <Skeleton />}
+      {(stage === "summarise" || done) && <Skeleton />}
     </div>
   );
 }
@@ -133,4 +242,20 @@ function Bar({ w, h, delay }: { w: string; h: string; delay: number }) {
       />
     </div>
   );
+}
+
+/** Time remaining, phrased the way a person would say it — and never a countdown that
+ *  hits zero while you are still waiting. Estimates are wrong sometimes; pretending
+ *  otherwise is what makes a progress bar untrustworthy. */
+/** Elapsed, in units a person reads at a glance. */
+function clock(secs: number): string {
+  const m = Math.floor(secs / 60);
+  return m ? `${m}m ${Math.round(secs % 60)}s` : `${Math.round(secs)}s`;
+}
+
+function left(secs: number): string {
+  if (secs <= 5) return "almost done";
+  const m = Math.floor(secs / 60);
+  const s = Math.round(secs % 60);
+  return m ? `~${m}m ${s}s left` : `~${s}s left`;
 }

@@ -1,4 +1,4 @@
-import type { Frame, Gist, Sentence, Takeaway } from "./types";
+import type { Frame, Gist, Sentence, StepImage, Takeaway } from "./types";
 
 /** The model returns text; the UI wants structure. Parsing here — rather than asking the
  *  model for JSON — keeps the prompt about WRITING WELL instead of about syntax, and a
@@ -17,6 +17,7 @@ export function parseGist(f: Frame, videoId: string): Gist {
   const tldrMatch = raw.match(/^\s*TL;?DR[:\s]*(.+)$/im);
   const tldr = tldrMatch ? tldrMatch[1].trim() : "";
 
+  const images: (StepImage | null)[] = f.images ?? [];
   const takeaways: Takeaway[] = [];
   // Split on the bold headlines; everything until the next one is that takeaway's body.
   const parts = raw.split(/\*\*(.+?)\*\*/g);
@@ -57,6 +58,9 @@ export function parseGist(f: Frame, videoId: string): Gist {
       stamp,
       seconds,
       evidence: seconds === null ? "" : evidenceAt(sentences, seconds),
+      // The engine builds this list by splitting the SAME "**" markers, so index i
+      // of images is index i of takeaways.
+      image: images[(i - 1) / 2] ?? null,
     });
   }
 

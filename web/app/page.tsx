@@ -44,27 +44,77 @@ export default function Home() {
   const [gist, setGist] = useState<Gist | null>(null);
   const [error, setError] = useState("");
   const busy = stage !== null;
+
   const videoId = parseYouTube(url);
   const badLink = url.trim().length > 0 && !videoId;
   const esRef = useRef<EventSource | null>(null);
+  const jobRef = useRef<string>("");
+
+  const cancel = useCallback(() => {
+    const job = jobRef.current;
+    if (job) {
+      fetch(`${ENGINE}/api/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job }),
+      }).catch(() => {});
+    }
+    esRef.current?.close();
+    esRef.current = null;
+    setStage(null);
+    setMsg("");
+  }, []);
+
+  const goHome = useCallback(() => {
+    esRef.current?.close();
+    esRef.current = null;
+    setStage(null);
+    setPct(0);
+    setMsg("");
+    setGist(null);
+    setError("");
+    setUrl("");
+    setQuestion("");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, []);
+
   const [libKey, setLibKey] = useState(0);   // bumped after a run so the library refreshes
+  const [libCount, setLibCount] = useState(0);
+  // OFF by default: Denis reads the argument faster in English even when the source is
+  // Russian, and the evidence quotes stay verbatim either way. On, for when the wording
+  // itself is the point.
+  const [native, setNative] = useState(false);
+  const [eta, setEta] = useState<Record<string, number> | null>(null);
 
   const start = useCallback(
-    async (ask: string, refresh = false, urlOverride?: string) => {
+    async (
+      ask: string,
+      mode: "" | "regen" | "refresh" = "",
+      urlOverride?: string,
+      nativeOverride?: boolean,
+    ) => {
       const target = (urlOverride ?? url).trim();
       if (!target || busy) return;
       setGist(null);
       setError("");
       setPct(0);
       setStage("check");
+      setEta(null);
       setMsg(ask ? "answering your question" : "starting");
 
       const res = await fetch(`${ENGINE}/api/gist`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: target, ask, refresh }),
+        body: JSON.stringify({
+          url: target,
+          ask,
+          native: nativeOverride ?? native,
+          regen: mode === "regen",       // new summary, transcript reused
+          refresh: mode === "refresh",   // download and transcribe again too
+        }),
       });
       const { job } = await res.json();
+      jobRef.current = job;
 
       const es = new EventSource(`${ENGINE}/api/events?job=${job}`);
       esRef.current = es;
@@ -78,14 +128,18 @@ export default function Home() {
       // WATCHDOG. If the engine dies mid-job — I restarted it under a running job and
       // the page sat on "reading video info" forever — the stream simply goes quiet.
       // EventSource does not consider silence an error, so nothing ever fires and the
-      // UI waits indefinitely. Any frame resets this; 90s of silence means something
-      // broke and the user deserves to be told rather than left watching a spinner.
+      // UI waits indefinitely.
+      //
+      // This USED to fire on healthy runs: summarising sends no frames, and a 57-minute
+      // video spends 183s in it, so the page declared a working engine dead and threw
+      // away a finished summary (Denis, 2026-08-08). The real fix is the engine's 10s
+      // heartbeat; this window is now only a backstop for genuine death.
       const arm = () => {
         clearTimeout(watchdog);
         watchdog = setTimeout(() => {
           setError("The engine stopped responding. It may have been restarted — try again.");
           done();
-        }, 90_000);
+        }, 150_000);
       };
       arm();
       es.onmessage = (ev) => {
@@ -94,10 +148,12 @@ export default function Home() {
         if (f.pct !== undefined) setPct(f.pct);
         if (f.stage) setStage(f.stage === "cached" ? "summarise" : f.stage);
         if (f.msg) setMsg(f.msg);
+        if (f.eta) setEta(f.eta);
         if (f.error) {
           setError(f.error);
           done();
         }
+        if (f.stopped) done();
         if (f.markdown !== undefined) {
           const id = parseYouTube(target) ?? target.match(YT_ID)?.[1] ?? "";
           setGist(parseGist(f, id));
@@ -114,23 +170,54 @@ export default function Home() {
         }
       };
     },
-    [url, busy]
+    [url, busy, native]
   );
 
   return (
     <main
-      className="mx-auto grid w-full max-w-[54rem] px-8 pb-28 pt-16
+      className="mx-auto grid w-full max-w-[57rem] px-8 pb-28 pt-16
                  [grid-template-columns:3.75rem_minmax(0,1fr)]
                  max-sm:[grid-template-columns:minmax(0,1fr)] max-sm:px-5
                  [&>*]:col-start-2 max-sm:[&>*]:col-start-1"
     >
-      <header className="mb-10">
-        <h1 className="text-[12px] font-semibold uppercase tracking-[0.16em] text-soft">
-          ytgist
-        </h1>
-        <p className="mt-2 text-[15px] leading-[1.45] text-soft">
-          Paste a link. Get the argument, not a wall of text.
-        </p>
+      <header className="mb-10 flex items-start justify-between gap-6">
+        <div>
+          <h1>
+            <button
+              onClick={goHome}
+              title="start over"
+              className="text-[12px] font-semibold uppercase tracking-[0.16em] text-soft
+                         transition-colors duration-150 hover:text-accent
+                         focus-visible:outline-2 focus-visible:outline-offset-4
+                         focus-visible:outline-accent"
+            >
+              ytgist
+            </button>
+          </h1>
+          <p className="mt-2 text-[15px] leading-[1.45] text-soft">
+            Paste a link. Get the argument, not a wall of text.
+          </p>
+        </div>
+
+        {libCount > 0 && (
+          <button
+            onClick={() =>
+              document.getElementById("library")?.scrollIntoView({ behavior: "smooth" })
+            }
+            title="everything you have summarised"
+            className="group -mt-1 flex shrink-0 items-center gap-2 rounded-lg border border-line
+                       px-2.5 py-1.5 text-[12.5px] font-medium text-soft
+                       transition-colors duration-150 hover:border-ink hover:text-ink
+                       focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden fill="none"
+                 stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+              <path d="M2 3.5h10M2 7h10M2 10.5h6" />
+            </svg>
+            Library
+            <span className="tabular-nums text-soft/60 group-hover:text-soft">{libCount}</span>
+          </button>
+        )}
       </header>
 
       <form
@@ -138,8 +225,36 @@ export default function Home() {
           e.preventDefault();
           start("");
         }}
-        className="flex gap-2.5"
+        className="flex flex-wrap gap-2.5"
       >
+        {/* A real checkbox, hidden but present: it keeps the label click, the space-bar
+            toggle and the focus ring for free, where a div-with-onClick loses all three. */}
+        <label className="group flex w-full cursor-pointer select-none items-center gap-2.5
+                          text-[13.5px] text-soft">
+          <input
+            type="checkbox"
+            checked={native}
+            onChange={(e) => setNative(e.target.checked)}
+            className="peer sr-only"
+          />
+          <span
+            className="relative h-[18px] w-[30px] shrink-0 rounded-full bg-line transition-colors
+                       duration-200 peer-checked:bg-accent
+                       peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2
+                       peer-focus-visible:outline-accent"
+          >
+            <span
+              className="absolute left-[2px] top-[2px] h-[14px] w-[14px] rounded-full bg-canvas
+                         shadow-sm transition-transform duration-200 peer-checked:translate-x-3
+                         group-has-[:checked]:translate-x-3"
+              style={{ transitionTimingFunction: "var(--ease-out-expo)" }}
+            />
+          </span>
+          <span className="transition-colors duration-150 group-hover:text-ink">
+            Keep the takeaways in the video&rsquo;s own language
+          </span>
+        </label>
+
         <input
           value={url}
           onChange={(e) => setUrl(e.target.value)}
@@ -165,7 +280,26 @@ export default function Home() {
         >
           Gist
         </button>
+
       </form>
+
+      {/* The honest cost, before you commit to it. Length is the one thing that changes
+          the wait by an order of magnitude, and nothing on the page said so — a 90-minute
+          interview looks exactly like a 5-minute clip until you are four minutes in. */}
+      <p className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-soft/80">
+        <span className="flex items-center gap-1.5">
+          <i className="inline-block h-1.5 w-1.5 rounded-full bg-good" />
+          under 20 min <b className="font-medium text-soft">~1 min</b>
+        </span>
+        <span className="flex items-center gap-1.5">
+          <i className="inline-block h-1.5 w-1.5 rounded-full bg-accent/70" />
+          about an hour <b className="font-medium text-soft">~3 min</b>
+        </span>
+        <span className="flex items-center gap-1.5">
+          <i className="inline-block h-1.5 w-1.5 rounded-full bg-line" />
+          over 3.8 h <b className="font-medium text-soft">refused</b>
+        </span>
+      </p>
 
       {/* The reason, right where the refusal is. */}
       {badLink && (
@@ -205,7 +339,7 @@ export default function Home() {
         </button>
       </div>
 
-      {busy && <Progress stage={stage} pct={pct} msg={msg} />}
+      {busy && <Progress stage={stage} pct={pct} msg={msg} eta={eta} onCancel={cancel} />}
 
       {error && (
         <p className="mt-8 rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3 text-[15px] text-red-600 dark:text-red-400">
@@ -213,17 +347,25 @@ export default function Home() {
         </p>
       )}
 
-      {gist && <Result gist={gist} onRegenerate={() => start("", true)} />}
+      {gist && (
+        <Result
+          gist={gist}
+          onRegenerate={() => start("", "regen")}
+          onRetranscribe={() => start("", "refresh")}
+        />
+      )}
 
       {!busy && (
         <History
           refreshKey={libKey}
-          onPick={(id) => {
+          onCount={setLibCount}
+          onPick={(id, wantNative) => {
             const u = `https://www.youtube.com/watch?v=${id}`;
             setUrl(u);
+            setNative(wantNative);      // keep the toggle honest about what is on screen
             setGist(null);
             window.scrollTo({ top: 0, behavior: "smooth" });
-            start("", false, u);        // a saved summary opens instantly
+            start("", "", u, wantNative);
           }}
         />
       )}

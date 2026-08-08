@@ -26,7 +26,22 @@ import urllib.request
 
 MODEL = os.path.expanduser("~/models/Qwen3.6-27B-UD-Q5_K_XL.gguf")
 BORROW_PORT = 18081          # where we LOOK for an existing server
-CTX = 32768                  # our own server's context; 90 min of speech is ~15k tokens
+# CONTEXT IS SIZED TO THE TRANSCRIPT, not fixed. A fixed 32k forced anything over ~50
+# minutes down the "summarise in halves" path, where each half is summarised blind to the
+# other and the merge cannot recover a cross-reference between them (Denis: "we should
+# raise the context window"). But a fixed 128k would make a 5-minute video pay for a KV
+# cache it never touches, so the size follows the input.
+CTX = 32768                  # floor — below this the ladder buys nothing
+CTX_MAX = 131072             # ceiling — ~4 hours of speech
+_CTX_LADDER = (32768, 49152, 65536, 98304, 131072)
+
+
+def ctx_for(need_tokens: int) -> int:
+    """Smallest context on the ladder that fits the prompt plus its answer."""
+    if not need_tokens:
+        return CTX
+    want = need_tokens + 2048
+    return next((c for c in _CTX_LADDER if want <= c), CTX_MAX)
 HTTP_TIMEOUT = 20            # every request is bounded — a hung server must not hang us
 GEN_TIMEOUT = 900            # generation over a long transcript is legitimately slow
 
@@ -65,7 +80,13 @@ def sweep_orphans(log=print) -> int:
     They orphan whenever the engine dies without unwinding — I killed serve.py under a
     running job and its 20GB child kept going; the next run then started a SECOND one and
     both crawled fighting for the GPU (2026-08-08). Only processes carrying our alias are
-    touched, so a server Denis started for something else is never at risk."""
+    touched, so a server Denis started for something else is never at risk.
+
+    CALLERS MUST HOLD THE RUN LOCK. "Ours" is decided by the alias, and a LIVE run's
+    server carries that same alias — so a second concurrent run sweeps the first one's
+    model out from under it mid-generation and the first dies with RemoteDisconnected.
+    That is exactly what happened when two gists were started at once (2026-08-08); the
+    cure is serve.py's _RUN lock, not a cleverer sweep."""
     import subprocess as sp
     killed = 0
     try:
@@ -97,7 +118,7 @@ class Server:
         borrowed = cls._try_borrow(need_tokens, model, log)
         if borrowed:
             return borrowed
-        return cls._start(model, log)
+        return cls._start(model, log, ctx_for(need_tokens))
 
     @classmethod
     def _try_borrow(cls, need_tokens, model, log):
@@ -124,16 +145,21 @@ class Server:
         return cls(base, proc=None, ctx=ctx or CTX)
 
     @classmethod
-    def _start(cls, model, log):
+    def _start(cls, model, log, ctx=CTX):
         if not os.path.isfile(model):
             raise ModelError(f"model not found: {model}")
         port = _free_port()
         # --alias MARKS this server as ours. Without a marker there is no safe way to
         # clean up an orphan: matching on "llama-server" would also kill one Denis
         # started for his own work, which is precisely what ~/serve-model.sh does wrong.
-        cmd = ["llama-server", "-m", model, "-c", str(CTX), "-fa", "on", "-np", "1",
+        # q8_0 KV cache roughly halves the memory a large context costs, at a quality
+        # difference not measurable on summarisation. It requires flash attention, which
+        # is already on.
+        cmd = ["llama-server", "-m", model, "-c", str(ctx), "-fa", "on", "-np", "1",
+               "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
                "--port", str(port), "--reasoning", "off", "--alias", ALIAS]
-        log(f"  starting llama-server on :{port} (own process, stopped when done)")
+        log(f"  starting llama-server on :{port} with a {ctx // 1024}k context "
+            f"(own process, stopped when done)")
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 start_new_session=True)
         base = f"http://127.0.0.1:{port}"
@@ -144,7 +170,7 @@ class Server:
                                  "(run it by hand to see why)")
             try:
                 if _get(base, "/health", timeout=2).get("status") == "ok":
-                    return cls(base, proc=proc, ctx=CTX)
+                    return cls(base, proc=proc, ctx=ctx)
             except Exception:
                 time.sleep(1)
         cls(base, proc=proc).stop()

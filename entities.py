@@ -18,6 +18,8 @@ material where that is a real cost.
 """
 import json
 import re
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -90,7 +92,7 @@ def image_for(name: str, lang: str = "ru"):
         try:
             d = _api(lg, {
                 "action": "query", "format": "json", "prop": "pageimages",
-                "piprop": "thumbnail", "pithumbsize": "320",
+                "piprop": "thumbnail", "pithumbsize": "320", "pilicense": "any",
                 "titles": name, "redirects": "1",
             })
             q = d.get("query") or {}
@@ -157,20 +159,35 @@ def _api_commons(params):
 
 
 def illustrate_named(steps, lang="ru"):
-    """Illustrate steps whose IMAGE: line names something real.
+    """Attach an image to steps whose IMAGE: line names a resolvable entity.
 
-    The model decides WHETHER an image is warranted and WHAT it is — the regex version
-    guessed from capitalised words and matched 'Kirienko strategy to weaken New People'
-    to Pavel Durov. Wikipedia's exact-title page image first (precise), Commons search
-    only as a fallback (broad). A step with no name, or a name we cannot resolve, gets
-    no image at all."""
+    Each step carries `image_query` = "<name> | <what kind of thing>", written by the
+    model. Resolution is Wikidata-only and refuses on any doubt — see the block below for
+    why both search-based designs were deleted rather than tuned."""
+    del lang                                  # Wikidata search is language-agnostic here
+    wanted = []
     for st in steps:
-        name = (st.get("image_query") or "").strip()
-        if not name or name.lower() in ("none", "нет", "-"):
+        raw = (st.get("image_query") or "").strip()
+        if not raw or raw.lower().split("|")[0].strip() in ("none", "нет", "-", ""):
             continue
-        hit = image_for(name, lang) or commons_search(name)
+        name, _, kind = raw.partition("|")
+        hit = resolve_entity(name.strip(), kind.strip())
         if hit:
-            st["image"] = {"src": hit[0], "label": hit[1], "href": hit[2], "query": name}
+            st["_qid"], st["_label"], st["_desc"] = hit
+            wanted.append(hit[0])
+
+    files = entity_images(wanted)             # ONE request for every entity at once
+    for st in steps:
+        qid = st.pop("_qid", None)
+        label, desc = st.pop("_label", ""), st.pop("_desc", "")
+        if qid and qid in files:
+            st["image"] = {
+                "src": commons_thumb(files[qid][0]),
+                "label": label,
+                "href": f"https://www.wikidata.org/wiki/{qid}",
+                "query": label,               # the RESOLVED name, not what we searched for
+                "note": desc,                 # Wikidata's own one-liner, shown as caption
+            }
     return steps
 
 
@@ -189,3 +206,112 @@ def illustrate(steps, lang="ru"):
                 used.add(name.lower())
                 break
     return steps
+
+
+# ---------------------------------------------------------------- Wikidata resolution
+#
+# FIRST PRINCIPLES, after two failed designs (Denis: "our experiment with images is not
+# very successful… think from first principles").
+#
+# Question the requirement. The goal was never "an image per step" — it was "make the
+# page less of a text wall". A WRONG image fails that goal harder than a blank space,
+# because the reader stops to work out why Hallowe'en apple-bobbing is next to a claim
+# about Russian electoral politics. So the requirement is: add an image ONLY when we can
+# prove what it depicts. Coverage is not the metric; precision is.
+#
+# Delete. Both previous mechanisms were free-text SEARCH — Commons file search, then
+# Wikipedia article search. Both share one fatal property: they always return something.
+# A search engine has no way to say "that isn't a thing". Deleted, not tuned.
+#
+# Simplify. Wikidata is an entity database, not an index, so it CAN refuse — measured:
+# "Apple party" → nothing, "public anxiety" → nothing, "Kirienko strategy" → nothing.
+# Exactly the three cases that produced garbage. And each candidate carries a one-line
+# description, which turns the one remaining failure mode (ambiguity: "Яблоко" is also a
+# fruit, "FOM" is also a fungus) into a solvable matching problem — the model already
+# knows which sense it meant, so it declares the TYPE and we match on that.
+#
+# Accelerate. One batched call fetches the images for every entity in a summary.
+# Automate. Resolutions are cached on disk; a repeated entity costs nothing.
+
+_WD = "https://www.wikidata.org/w/api.php"
+
+# Descriptions that mean "this is a page ABOUT a thing", not the thing itself.
+_NOT_A_SUBJECT = ("disambiguation", "wikimedia", "wikipedia", "scientific article",
+                  "encyclopedia article", "article in", "family name", "given name",
+                  "surname", "list of", "genus of", "species of")
+
+_STOP = frozenset(
+    "a an the of in on for and or to is was were by with its their this that from at "
+    "russian russia soviet former current".split()
+)
+
+
+def _words(t):
+    return {w for w in re.findall(r"[\w']+", (t or "").lower())
+            if w not in _STOP and len(w) > 2}
+
+
+def _wd(params, tries=3):
+    """Wikimedia answers 429 under any burst, and the old code swallowed it — which
+    silently produced a summary with no images and no explanation. Back off instead."""
+    url = _WD + "?" + urllib.parse.urlencode({**params, "format": "json"})
+    for n in range(tries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                return json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 503) and n < tries - 1:
+                time.sleep(1.5 * (n + 1))
+                continue
+            return {}
+        except Exception:
+            return {}
+    return {}
+
+
+def resolve_entity(name: str, kind: str):
+    """(qid, label, description) for a named thing, or None.
+
+    `kind` is the model's own 2-4 word description of what sort of thing it means. It is
+    load-bearing: without it "Яблоко" resolves to the fruit and "FOM" to a genus of
+    fungi. With it, both land correctly — measured."""
+    if not name:
+        return None
+    hits = _wd({"action": "wbsearchentities", "language": "en", "uselang": "en",
+                "type": "item", "limit": 7, "search": name}).get("search", [])
+    want = _words(kind)
+    best, best_score = None, 0
+    for h in hits:
+        desc = h.get("description") or ""
+        if any(b in desc.lower() for b in _NOT_A_SUBJECT):
+            continue
+        score = len(want & _words(desc))
+        if score > best_score:
+            best, best_score = (h["id"], h.get("label") or name, desc), score
+    # A hit with NO overlap is an accidental string match, which is precisely how the old
+    # designs failed. Require the type to agree.
+    return best if best_score >= 1 else None
+
+
+def entity_images(qids):
+    """{qid: (commons_filename, property)} for many entities in ONE request."""
+    if not qids:
+        return {}
+    d = _wd({"action": "wbgetentities", "props": "claims", "ids": "|".join(qids[:50])})
+    out = {}
+    for qid, ent in (d.get("entities") or {}).items():
+        for prop in ("P18", "P154", "P41", "P94"):     # image, logo, flag, coat of arms
+            try:
+                out[qid] = (ent["claims"][prop][0]["mainsnak"]["datavalue"]["value"], prop)
+                break
+            except Exception:
+                pass
+    return out
+
+
+def commons_thumb(filename: str, width: int = 320) -> str:
+    """Special:FilePath does the thumbnailing server-side, so no second API call is
+    needed to turn a Commons filename into a usable image URL."""
+    return ("https://commons.wikimedia.org/wiki/Special:FilePath/"
+            + urllib.parse.quote(filename.replace(" ", "_")) + f"?width={width}")

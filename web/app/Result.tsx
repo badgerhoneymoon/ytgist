@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { RefreshCw, RotateCcw } from "lucide-react";
 import type { Gist, Takeaway } from "./types";
 
 /** The reading surface.
@@ -20,21 +21,23 @@ import type { Gist, Takeaway } from "./types";
 export default function Result({
   gist,
   onRegenerate,
+  onRetranscribe,
 }: {
   gist: Gist;
   onRegenerate: () => void;
+  onRetranscribe: () => void;
 }) {
   const total = Object.values(gist.timings).reduce((a, b) => a + b, 0);
 
   return (
     <article className="mt-13" style={{ animation: "rise .5s var(--ease-out-expo)" }}>
-      <h2 className="col-start-2 text-[30px] font-semibold leading-[1.16] tracking-[-0.02em]">
+      <h2 className="col-start-2 text-[33px] font-semibold leading-[1.14] tracking-[-0.02em]">
         {gist.title}
       </h2>
 
       {gist.tldr && (
         <p className="prose-serif col-start-2 mt-6 border-l-[3px] border-accent bg-accent/[0.05]
-                      py-3.5 pl-4 pr-3 font-serif text-[20px] leading-[1.5] text-ink">
+                      py-3.5 pl-4 pr-3 font-serif text-[21px] leading-[1.52] text-ink">
           {gist.tldr}
         </p>
       )}
@@ -48,80 +51,95 @@ export default function Result({
       {/* The ONLY element allowed to break the left edge into the rail — that single
           deliberate misalignment is what visually terminates the article. */}
       <footer className="col-span-full mt-20 border-t border-line pt-6">
-        <div className="flex h-1.5 overflow-hidden rounded-full bg-line">
-          {Object.entries(gist.timings).map(([k, v]) => (
-            <div
-              key={k}
-              title={`${k} ${v}s`}
-              className="transition-[width] duration-500"
-              style={{ width: `${(v / total) * 100}%`, background: COLORS[k] ?? "#999" }}
-            />
-          ))}
-        </div>
+        {/* A summary opened from the library did NO work, so it has no timings — and a
+            cost breakdown of nothing rendered as an empty bar reading "0.0s · Infinity×
+            faster than watching". Zero work is its own state, not a degenerate case of
+            the chart. */}
+        {total > 0 ? (
+          <>
+            <div className="flex h-1.5 overflow-hidden rounded-full bg-line">
+              {Object.entries(gist.timings).map(([k, v]) => (
+                <div
+                  key={k}
+                  title={`${k} ${dur(v)}`}
+                  className="transition-[width] duration-500"
+                  style={{ width: `${(v / total) * 100}%`, background: COLORS[k] ?? "#999" }}
+                />
+              ))}
+            </div>
 
-        <div className="mt-3.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] font-medium text-soft">
-          {Object.entries(gist.timings).map(([k, v]) => (
-            <span key={k} className="flex items-center gap-1.5">
-              <i
-                className="inline-block h-2 w-2 rounded-[2px]"
-                style={{ background: COLORS[k] ?? "#999" }}
-              />
-              {k} <b className="font-semibold text-ink">{v}s</b>
-            </span>
-          ))}
-          <span className="ml-auto">
-            {total.toFixed(1)}s
-            {gist.duration > 0 &&
-              ` · ${Math.round(gist.duration / total)}× faster than watching`}
-          </span>
-        </div>
+            <div className="mt-3.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] font-medium text-soft">
+              {Object.entries(gist.timings).map(([k, v]) => (
+                <span key={k} className="flex items-center gap-1.5">
+                  <i
+                    className="inline-block h-2 w-2 rounded-[2px]"
+                    style={{ background: COLORS[k] ?? "#999" }}
+                  />
+                  {k} <b className="font-semibold text-ink">{dur(v)}</b>
+                </span>
+              ))}
+              <span className="ml-auto">
+                {total.toFixed(1)}s
+                {gist.duration > 0 &&
+                  ` · ${Math.round(gist.duration / total)}× faster than watching`}
+              </span>
+            </div>
 
-        {/* An ABSENT phase is information: without this line the bar reads as broken. */}
-        {gist.cached && (
-          <p className="mt-2 text-[13px] text-soft">
-            transcript was cached — download and transcription skipped
+            {/* An ABSENT phase is information: without this line the bar reads as broken. */}
+            {gist.cached && (
+              <p className="mt-2 text-[13px] text-soft">
+                transcript was cached — download and transcription skipped
+              </p>
+            )}
+          </>
+        ) : (
+          <p className="text-[13px] text-soft">
+            opened from your library — nothing had to be recomputed
           </p>
         )}
 
-        <button
-          onClick={() => download(gist)}
-          className="mt-6 mr-2 rounded-lg border border-line px-3.5 py-2 text-[13px] font-medium text-soft
-                     transition-colors duration-150 hover:border-ink hover:text-ink
-                     focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-        >
-          Download .md
-        </button>
-        <button
-          onClick={onRegenerate}
-          className="mt-6 rounded-lg border border-line px-3.5 py-2 text-[13px] font-medium text-soft
-                     transition-colors duration-150 hover:border-ink hover:text-ink
-                     focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-        >
-          Regenerate
-        </button>
+        {/* Icons because two bordered text pills in the same weight read as one grey
+            smear (Denis: "very pale and faceless"). The icon carries the verb, so the
+            label can stay short and the two actions stop looking interchangeable. */}
+        <div className="mt-6 flex flex-wrap gap-2">
+          <button
+            onClick={onRegenerate}
+            title="new summary from the transcript already on disk"
+            className="group flex items-center gap-2 rounded-lg border border-line px-3.5 py-2
+                       text-[13px] font-medium text-ink transition-colors duration-150
+                       hover:border-accent hover:bg-accent/[0.06] hover:text-accent
+                       focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            <RefreshCw size={14} strokeWidth={2} className="text-soft group-hover:text-accent" />
+            New summary
+          </button>
+          <button
+            onClick={onRetranscribe}
+            title="download and transcribe the audio again, then summarise"
+            className="group flex items-center gap-2 rounded-lg border border-line px-3.5 py-2
+                       text-[13px] font-medium text-soft transition-colors duration-150
+                       hover:border-ink hover:text-ink
+                       focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          >
+            <RotateCcw size={14} strokeWidth={2} className="text-soft/70 group-hover:text-ink" />
+            Re-transcribe
+          </button>
+        </div>
       </footer>
     </article>
   );
 }
 
-/** The summary as a markdown file — headline, body, and a clickable timestamp per step,
- *  so it drops straight into notes without losing the links back to the video. */
-function download(gist: Gist) {
-  const lines = [`# ${gist.title}`, ""];
-  if (gist.tldr) lines.push(`> ${gist.tldr}`, "");
-  gist.takeaways.forEach((t, i) => {
-    const link = t.seconds !== null
-      ? ` — [${t.stamp}](https://youtu.be/${gist.videoId}?t=${t.seconds})` : "";
-    lines.push(`## ${i + 1}. ${t.headline}${link}`, "", t.body, "");
-    if (t.evidence) lines.push(`> ${t.evidence}…`, "");
-  });
-  lines.push("---", `Source: https://youtu.be/${gist.videoId}`);
-  const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `${gist.title.slice(0, 60).replace(/[^\p{L}\p{N} .-]/gu, "")}.md`;
-  a.click();
-  URL.revokeObjectURL(a.href);
+/** Seconds are the wrong unit past about a minute — "367.4s" makes you do arithmetic to
+ *  find out it is six minutes (Denis, 2026-08-08). Sub-minute keeps one decimal, because
+ *  at that scale the tenths are the interesting part. */
+function dur(secs: number): string {
+  if (secs < 60) return `${secs < 10 ? secs.toFixed(1) : Math.round(secs)}s`;
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = Math.round(secs % 60);
+  if (h) return `${h}h ${m}m`;
+  return s ? `${m}m ${s}s` : `${m}m`;
 }
 
 const COLORS: Record<string, string> = {
@@ -140,7 +158,8 @@ function Step({ n, t, videoId }: { n: number; t: Takeaway; videoId: string }) {
 
   return (
     <li className="group mb-13 grid grid-cols-[3.75rem_minmax(0,1fr)] last:mb-0
-                   max-sm:grid-cols-[minmax(0,1fr)]">
+                   max-sm:grid-cols-[minmax(0,1fr)] [&>div]:after:block
+                   [&>div]:after:clear-both [&>div]:after:content-['']">
       {/* RAIL: number over timestamp, right-aligned to a shared edge. Both are metadata,
           so both live outside the reading column. */}
       <div className="col-start-1 flex flex-col items-end pr-3.5 pt-0.5
@@ -165,16 +184,41 @@ function Step({ n, t, videoId }: { n: number; t: Takeaway; videoId: string }) {
       </div>
 
       <div className="col-start-2 max-sm:col-start-1">
-        <h3 className="text-[18px] font-semibold leading-[1.3] tracking-[-0.006em] text-ink">
+        <h3 className="text-[19.5px] font-semibold leading-[1.28] tracking-[-0.006em] text-ink">
           {t.headline}
         </h3>
 
-        <p className="prose-serif mt-3 font-serif text-[17.5px] leading-[1.62] text-body">
+        {/* FLOATED, not stacked. A block image between headline and body would break the
+            argument in half every time one resolves; floating lets the prose close around
+            it, so a step with a picture and a step without still read as the same object.
+            Small on purpose — these are logos and portraits that identify a subject, not
+            illustrations that carry meaning. */}
+        {t.image && (
+          <figure className="float-right ml-5 mt-3 mb-1 w-[96px] max-sm:w-[76px]">
+            <a href={t.image.href} target="_blank" rel="noopener" title={t.image.label}>
+              <img
+                src={t.image.src}
+                alt={t.image.label}
+                loading="lazy"
+                className="w-full rounded-md border border-line bg-canvas object-contain
+                           transition-opacity duration-150 hover:opacity-85"
+              />
+            </a>
+            <figcaption className="mt-1.5 text-[11px] leading-[1.35] text-soft/70">
+              {t.image.query}
+            </figcaption>
+          </figure>
+        )}
+
+        <p className="prose-serif mt-3 font-serif text-[19px] leading-[1.6] text-body">
           {t.body}
         </p>
 
         {t.evidence && (
-          <>
+          /* clear-right so a floated image narrows the BODY (where wrapping reads as
+             intentional) but never the quote, whose ragged right edge against a
+             half-width block just looks broken. */
+          <div className="clear-right">
             <button
               onClick={() => setOpen((v) => !v)}
               aria-expanded={open}
@@ -197,13 +241,13 @@ function Step({ n, t, videoId }: { n: number; t: Takeaway; videoId: string }) {
               <div className="overflow-hidden">
                 <blockquote
                   className="prose-serif mt-2.5 border-l-2 border-line bg-ink/[0.025] py-3 pl-4 pr-3
-                             font-serif text-[15px] leading-[1.5] text-body"
+                             font-serif text-[16.5px] leading-[1.52] text-body"
                 >
                   {t.evidence}…
                 </blockquote>
               </div>
             </div>
-          </>
+          </div>
         )}
       </div>
     </li>

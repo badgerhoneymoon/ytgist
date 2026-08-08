@@ -11,6 +11,9 @@ export type Frame = {
   pct?: number;
   msg?: string;
   error?: string;
+  stopped?: boolean;
+  eta?: Record<string, number>;   // seconds per remaining phase, sent once length is known
+  video_minutes?: number;
   // final frame only
   title?: string;
   markdown?: string;
@@ -19,6 +22,17 @@ export type Frame = {
   duration?: number;
   cached?: boolean;
   sentences?: Sentence[];
+  images?: (StepImage | null)[];   // index-aligned with the takeaways
+};
+
+/** A Wikipedia page image for the thing a step names. Optional by design: the model says
+ *  "IMAGE: none" for feelings, trends and statistics, and an unresolvable name gets
+ *  nothing rather than a confident wrong picture. */
+export type StepImage = {
+  src: string;
+  label: string;
+  href: string;
+  query: string;
 };
 
 /** One parsed takeaway: a headline that states the point, a sentence of substance, and
@@ -29,6 +43,7 @@ export type Takeaway = {
   seconds: number | null;
   stamp: string | null;
   evidence: string;
+  image: StepImage | null;
 };
 
 export type Gist = {

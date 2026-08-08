@@ -17,12 +17,39 @@ import queue
 import re
 import sys
 import threading
+import time
 import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ytgist
+
+_RUN = threading.Lock()   # the 27B is one physical resource; runs queue, never overlap
+
+
+class Control:
+    """The handle a running job can be stopped by.
+
+    `server` is filled in once the model server exists — stopping it is what interrupts a
+    generation that is already under way, since between checkpoints the worker is blocked
+    inside one HTTP call for minutes."""
+
+    def __init__(self):
+        self.cancelled = threading.Event()
+        self.server = None
+
+    def stop(self):
+        self.cancelled.set()
+        srv = self.server
+        if srv is not None:
+            try:
+                srv.stop()
+            except Exception:
+                pass
+
+
+_ctl = {}                 # job id → Control
 
 PORT = int(os.environ.get("YTGIST_PORT", "8765"))
 _jobs = {}          # id → Queue of event dicts
@@ -325,6 +352,20 @@ class Handler(BaseHTTPRequestHandler):
         _jobs.pop(job, None)
 
     def do_POST(self):
+        if self.path == "/api/cancel":
+            n = int(self.headers.get("Content-Length", 0))
+            job = (json.loads(self.rfile.read(n) or b"{}") or {}).get("job", "")
+            ctl = _ctl.get(job)
+            if ctl:
+                ctl.stop()
+            body = json.dumps({"ok": bool(ctl)}).encode()
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path != "/api/gist":
             return self.send_error(404)
         n = int(self.headers.get("Content-Length", 0))
@@ -332,7 +373,9 @@ class Handler(BaseHTTPRequestHandler):
         job = uuid.uuid4().hex
         q = queue.Queue()
         _jobs[job] = q
-        threading.Thread(target=self._work, args=(q, req), daemon=True).start()
+        ctl = Control()
+        _ctl[job] = ctl
+        threading.Thread(target=self._work, args=(q, req, ctl), daemon=True).start()
         body = json.dumps({"job": job}).encode()
         self.send_response(200)
         self._cors()
@@ -342,11 +385,41 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     @staticmethod
-    def _work(q, req):
+    def _work(q, req, ctl=None):
         try:
-            ytgist.run(req.get("url", ""), req.get("ask") or None,
-                       req.get("model", "dense"),
-                       refresh=bool(req.get("refresh")), progress=q.put)
+            if not _RUN.acquire(blocking=False):
+                q.put({"stage": "summarise", "pct": 5,
+                       "msg": "another summary is running — waiting for the model"})
+                _RUN.acquire()
+            # HEARTBEAT. Summarising emits nothing until it is finished — 183s on a
+            # 57-minute video — and the browser cannot tell a working engine from a dead
+            # one during silence, so its watchdog declared a perfectly healthy run dead
+            # (2026-08-08). A tick every 10s carries the elapsed seconds, which is both
+            # the keepalive and the only honest thing there is to report.
+            last = {"stage": "check", "pct": 0, "msg": ""}
+
+            def progress(f):
+                if f.get("stage"):
+                    last.update({k: f[k] for k in ("stage", "pct", "msg") if k in f})
+                q.put(f)
+
+            stop = threading.Event()
+
+            def beat():
+                t0 = time.time()
+                while not stop.wait(10):
+                    q.put({**last, "elapsed": round(time.time() - t0)})
+
+            threading.Thread(target=beat, daemon=True).start()
+            try:
+                ytgist.run(req.get("url", ""), req.get("ask") or None,
+                           req.get("model", "dense"),
+                           refresh=bool(req.get("refresh")), progress=progress,
+                           native=bool(req.get("native")),
+                           regen=bool(req.get("regen")), control=ctl)
+            finally:
+                stop.set()
+                _RUN.release()
             res = getattr(ytgist.run, "last", None)
             if not res:
                 q.put({"error": "No speech was found in that video."})
@@ -363,6 +436,12 @@ class Handler(BaseHTTPRequestHandler):
                    "cached": res.get("cached", False),
                    "sentences": res.get("sentences") or [],
                    "images": res.get("images") or []})
+        except ytgist.TooLong as e:
+            q.put({"error": html.escape(str(e))})
+        except ytgist.Cancelled:
+            # Not an error. Stopping is a legitimate outcome, and dressing it up in red
+            # would teach the user that pressing their own Stop button broke something.
+            q.put({"stopped": True})
         except ytgist.yt.IngestError as e:
             q.put({"error": html.escape(str(e))})
         except Exception as e:                      # a crash must reach the page, not just stderr

@@ -1,0 +1,15 @@
+# Build output and caches — never belongs in git. These were committed by accident and
+# took the repository from ~1MB to 340MB before it ever reached a remote (2026-08-08).
+web/.next/
+web/node_modules/
+web/tsconfig.tsbuildinfo
+node_modules/
+__pycache__/
+*.pyc
+
+# Runtime state: transcripts, summaries and timing history are this machine's, not the
+# project's. They are also other people's speech.
+cache/
+.ytgist/
+*.log
+.DS_Store
