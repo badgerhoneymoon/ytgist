@@ -320,7 +320,7 @@ function Step({
               className="mt-3.5 border-l-2 border-accent/30 pl-4"
               style={{ animation: "rise .35s var(--ease-out-expo)" }}
             >
-              <Cited paragraphs={parseCited(more)} className="text-[17px]" />
+              <Cited paragraphs={parseCited(more)} className="text-[19px]" />
             </div>
           ) : (
             <p className="mt-2.5 text-[12.5px] text-soft/80">
