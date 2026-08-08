@@ -88,8 +88,35 @@ def _trim():
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
+def _fit(rows, phase):
+    """(fixed_seconds, seconds_per_minute) for a phase, or None.
+
+    AFFINE, not a bare rate. Summarising a 7-minute video cost 8.0 s/min while an 87-minute
+    one cost 4.2 — not because the long one is efficient, but because the OUTPUT barely
+    grows: a short video still gets five takeaways written out. Cost is prefill (scales with
+    length) plus generation (roughly fixed), and a single per-minute number splits the
+    difference badly at both ends — it under-predicted a short video by 105% (2026-08-08).
+
+    Least squares, then clamped: a negative intercept or slope is a fitting artefact of a
+    thin sample, not a discovery that longer videos are cheaper."""
+    pts = [(r["minutes"], r["timings"][phase])
+           for r in rows
+           if r.get("minutes", 0) > 0.5 and phase in (r.get("timings") or {})]
+    if len(pts) < MIN_SAMPLES:
+        return None
+    n = len(pts)
+    mx = sum(x for x, _ in pts) / n
+    my = sum(y for _, y in pts) / n
+    var = sum((x - mx) ** 2 for x, _ in pts)
+    if var < 1e-9:                       # every sample the same length: no slope to find
+        return (my, 0.0)
+    slope = sum((x - mx) * (y - my) for x, y in pts) / var
+    slope = max(slope, 0.0)
+    return (max(my - slope * mx, 0.0), slope)
+
+
 def _median_rate(rows, phase):
-    """Seconds per minute of video for one phase, or None if nothing usable."""
+    """Seconds per minute — kept for the CLI report, which reads better as one number."""
     vals = [r["timings"][phase] / r["minutes"]
             for r in rows
             if r.get("minutes", 0) > 0.5 and phase in (r.get("timings") or {})]
@@ -124,9 +151,9 @@ def learned(power: str, ctx: int) -> dict:
 
     out = {}
     for phase in SCALING:
-        rate = _median_rate(src, phase)
-        if rate is not None:
-            out[phase] = rate
+        fit = _fit(src, phase)
+        if fit is not None:
+            out[phase] = fit                  # (fixed seconds, seconds per minute)
     load = _median_load(src, ctx)
     if load is not None:
         out["model load"] = load
@@ -136,9 +163,16 @@ def learned(power: str, ctx: int) -> dict:
 
 
 def accuracy():
-    """(predicted, actual, signed error %) per run that carries a prediction, oldest first."""
+    """(predicted, actual, signed error %) per run that carries a prediction, oldest first.
+
+    Runs whose phases no longer exist are SKIPPED. Two of the first three scored runs
+    measured an "answer" phase from the Ask feature, which has since been deleted — leaving
+    them in made the trend look like a regression when the estimator they indict is gone."""
+    known = set(SCALING) | {"model load", "read info"}
     out = []
     for r in _rows():
+        if set((r.get("predicted") or {})) - known:
+            continue
         p = sum((r.get("predicted") or {}).values())
         a = sum((r.get("timings") or {}).values())
         if p > 0 and a > 0:

@@ -45,6 +45,10 @@ def ctx_for(need_tokens: int) -> int:
     want = need_tokens + 2048
     return next((c for c in _CTX_LADDER if want <= c), CTX_MAX)
 HTTP_TIMEOUT = 20            # every request is bounded — a hung server must not hang us
+# https://huggingface.co/Qwen/Qwen3.6-27B — "Best Practices", instruct/non-thinking row.
+QWEN_SAMPLING = {"top_p": 0.80, "top_k": 20, "min_p": 0.0,
+                 "presence_penalty": 1.5, "repetition_penalty": 1.0}
+
 GEN_TIMEOUT = 900            # generation over a long transcript is legitimately slow
 
 
@@ -318,6 +322,16 @@ class Server:
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": user}],
             "max_tokens": max_tokens, "temperature": temperature, "stream": False,
+            # QWEN'S OWN NON-THINKING RECIPE, sent explicitly. Left unset, llama.cpp
+            # substitutes its defaults — top_k 40, top_p 0.9, min_p 0.1 — which disagree
+            # with the model card on every count. min_p 0.1 is the quiet one: Qwen asks for
+            # 0.0, and a non-zero floor interacts badly with the low top_p 0.8 it pairs
+            # with. We were inheriting all three silently (researched 2026-08-08).
+            #
+            # Temperature stays OURS. The card suggests 0.7 for general use; this pipeline
+            # extracts claims from a transcript, where a flatter distribution is the point,
+            # so callers keep passing 0.2-0.3 deliberately.
+            **QWEN_SAMPLING,
         }, timeout=GEN_TIMEOUT)
         try:
             return r["choices"][0]["message"]["content"].strip()

@@ -81,17 +81,25 @@ def estimate(minutes: float, cached: bool) -> dict:
     this machine, at this power mode, wins. Each finished run makes this sharper."""
     ctx = model_client.ctx_for(int(minutes * 60 * CHARS_PER_SEC / CHARS_PER_TOKEN) + 1400)
     known = timing_log.learned(timing_log.power_mode(), ctx)
-    rate = dict(RATE)
-    rate.update({k: v for k, v in known.items() if k in RATE})
+
+    def cost(phase):
+        """Learned affine cost if we have one, else the hand-fitted per-minute constant."""
+        fit = known.get(phase)
+        if isinstance(fit, tuple):
+            return fit[0] + fit[1] * minutes
+        return RATE[phase] * minutes
+
     load = known.get("model load", LOAD_BASE + LOAD_PER_MIN * minutes)
+    if isinstance(load, tuple):
+        load = load[0] + load[1] * minutes
 
     if cached:
-        return {"model load": load, "summarise": rate["summarise"] * minutes}
+        return {"model load": load, "summarise": cost("summarise")}
     return {"read info": 2.0,
-            "download": rate["download"] * minutes,
-            "transcribe": rate["transcribe"] * minutes,
+            "download": cost("download"),
+            "transcribe": cost("transcribe"),
             "model load": load,
-            "summarise": rate["summarise"] * minutes}
+            "summarise": cost("summarise")}
 
 
 EXPAND_MAX = 8 * 60         # a step's span, capped — beyond this it stops being one point
