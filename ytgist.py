@@ -144,14 +144,15 @@ def expand(vid, start, end, headline, body, native=False, log=print):
 
     user = gist_prompt.EXPAND_USER.format(
         headline=headline.strip(), body=body.strip(),
-        language=("Write in the same language as the passage." if native
-                  else "Write in English, even though the passage may be in another language."),
+        language=("Every word in the same language as the passage — do not translate."
+                  if native else "Write in English."),
         transcript=gist_prompt.format_transcript(window))
 
-    need = len(gist_prompt.EXPAND_SYSTEM + user) // 2 + 600
+    system = gist_prompt.expand_system_for(native)
+    need = len(system + user) // 2 + 600
     srv = model_client.Server.acquire(need_tokens=need, model=MODELS["dense"], log=log)
     with srv:
-        out = srv.chat(gist_prompt.EXPAND_SYSTEM, user, max_tokens=600, temperature=0.25)
+        out = srv.chat(system, user, max_tokens=600, temperature=0.25)
     if "NOTHING FURTHER" in out.upper():
         save_expansion(vid, native, start, "")   # "asked, and there is nothing" is an answer
         return ""

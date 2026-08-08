@@ -115,7 +115,7 @@ def main():
                     f"Write in English unless told otherwise above.\n\n"
                     f"PASSAGE\n<<<\n{transcript}\n>>>")
             t0 = time.time()
-            text = srv.chat(gist_prompt.EXPAND_SYSTEM, user, max_tokens=420, temperature=0.2)
+            text = srv.chat(gist_prompt.expand_system_for(False), user, max_tokens=420, temperature=0.2)
             out[name] = (gist_prompt.verify(text.strip(), cached["sentences"], vid)[0],
                          time.time() - t0)
 
