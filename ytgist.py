@@ -506,8 +506,6 @@ def run(url, model_key="dense", refresh=False, progress=None,
                     raise Cancelled()
                 raise
 
-    step("done", 100, "")
-
     # IMAGE: lines → real pictures. AFTER generation, so a slow lookup never delays the
     # text, and silent on failure: a step with no resolvable subject simply has no image,
     # which is the right outcome for "anxiety rose to 57%".
@@ -519,6 +517,9 @@ def run(url, model_key="dense", refresh=False, progress=None,
         for block in out.split("**")[1:]:
             m = re.search(r"IMAGE:\s*(.+)", block)
             steps.append({"image_query": (m.group(1).strip() if m else "")})
+        named = sum(1 for st in steps if st["image_query"]
+                    and st["image_query"].split("|")[0].strip().lower() not in ("none", "нет", "-"))
+        step("images", 96, f"looking up {named} subject{'s' if named != 1 else ''}")
         entities.illustrate_named(steps)
         images = [st.get("image") for st in steps]
         if any(images):
@@ -527,6 +528,8 @@ def run(url, model_key="dense", refresh=False, progress=None,
     except Exception as exc:
         log(f"  images skipped ({exc!r})")
     out = re.sub(r"^\s*IMAGE:.*$", "", out, flags=re.M)   # never show the directive
+
+    step("done", 100, "")
 
     was_cached = bool(timings.pop("_cached", False))   # popped BEFORE any consumer
     text, dropped = gist_prompt.verify(out, sentences, vid)

@@ -16,6 +16,7 @@ image at all. Never a placeholder, never a loosely-related stock photo: an image
 merely gestures at the topic implies things the speaker never said, and this is political
 material where that is a real cost.
 """
+import concurrent.futures as cf
 import json
 import re
 import time
@@ -165,16 +166,23 @@ def illustrate_named(steps, lang="ru"):
     model. Resolution is Wikidata-only and refuses on any doubt — see the block below for
     why both search-based designs were deleted rather than tuned."""
     del lang                                  # Wikidata search is language-agnostic here
-    wanted = []
-    for st in steps:
+
+    def ask(st):
         raw = (st.get("image_query") or "").strip()
         if not raw or raw.lower().split("|")[0].strip() in ("none", "нет", "-", ""):
-            continue
+            return
         name, _, kind = raw.partition("|")
         hit = resolve_entity(name.strip(), kind.strip())
         if hit:
             st["_qid"], st["_label"], st["_desc"] = hit
-            wanted.append(hit[0])
+
+    # CONCURRENTLY. Each lookup is a network round-trip that spends its time waiting, so
+    # seventeen in series cost 31 seconds of wall clock for a few hundred ms of work
+    # (measured 2026-08-09). Four at a time: enough to hide the latency, few enough to stay
+    # a polite client — Wikimedia rate-limits bursts and answers 429.
+    with cf.ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(ask, steps))
+    wanted = [st["_qid"] for st in steps if st.get("_qid")]
 
     files = entity_images(wanted)             # ONE request for every entity at once
     for st in steps:

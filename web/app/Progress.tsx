@@ -23,6 +23,7 @@ function secsOf(eta: Record<string, number>, key: Stage): number {
   if (key === "check") return eta["read info"] ?? 0;
   // Model load rides with whichever of the two is actually happening — only one ever is.
   if (key === "summarise") return (eta["summarise"] ?? 0) + (eta["model load"] ?? 0);
+  if (key === "images") return eta["images"] ?? 0;
   return eta[key] ?? 0;
 }
 
@@ -31,6 +32,7 @@ const STEPS: { key: Stage; label: string; weight: number; secs: number }[] = [
   { key: "download", label: "downloading audio", weight: 8, secs: 10 },
   { key: "transcribe", label: "transcribing", weight: 10, secs: 12 },
   { key: "summarise", label: "summarising", weight: 40, secs: 45 },
+  { key: "images", label: "finding pictures", weight: 5, secs: 6 },
 ];
 
 export default function Progress({
