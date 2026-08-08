@@ -27,6 +27,7 @@ import subprocess
 import time
 
 LOG = os.path.expanduser("~/.ytgist/runs.jsonl")
+EXPANDS = os.path.expanduser("~/.ytgist/expands.jsonl")
 KEEP = 200                  # newest N kept; older entries describe a machine long gone
 MIN_SAMPLES = 3             # below this, a median is just an anecdote
 
@@ -50,7 +51,7 @@ def power_mode() -> str:
 
 
 def record(minutes: float, cached: bool, ctx: int, timings: dict, native: bool = False,
-           predicted: dict | None = None):
+           predicted: dict | None = None, warm: bool = False):
     """Append one finished run, WITH the prediction it was given.
 
     Storing only the actuals makes the log self-improving but unfalsifiable — you can see
@@ -61,6 +62,7 @@ def record(minutes: float, cached: bool, ctx: int, timings: dict, native: bool =
         os.makedirs(os.path.dirname(LOG), exist_ok=True)
         row = {"at": time.time(), "minutes": round(minutes, 2), "cached": bool(cached),
                "ctx": int(ctx or 0), "power": power_mode(), "native": bool(native),
+               "warm": bool(warm),
                "timings": {k: round(float(v), 2) for k, v in (timings or {}).items()
                            if not k.startswith("_")},
                "predicted": {k: round(float(v), 2) for k, v in (predicted or {}).items()}}
@@ -69,6 +71,46 @@ def record(minutes: float, cached: bool, ctx: int, timings: dict, native: bool =
         _trim()
     except Exception:
         pass
+
+
+def record_expand(minutes: float, chars: int, warm: bool, secs: float, native: bool = False):
+    """One "more detail" click. Kept in its OWN file, not runs.jsonl.
+
+    An expansion is a different animal from a gist run — no download, no transcription, a
+    window of a couple of minutes rather than a whole video — and mixing the two would
+    corrupt the per-minute fits that runs.jsonl exists to produce. It is also the operation
+    clicked most often and the one we had no numbers for at all: the claim that parking the
+    server halves its cost was measured once, by hand, and never again (2026-08-08)."""
+    try:
+        os.makedirs(os.path.dirname(EXPANDS), exist_ok=True)
+        row = {"at": time.time(), "window_min": round(minutes, 2), "chars": int(chars),
+               "warm": bool(warm), "native": bool(native), "power": power_mode(),
+               "secs": round(float(secs), 2)}
+        with open(EXPANDS, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+    except Exception:
+        pass
+
+
+def expand_report() -> str:
+    """Cold versus warm, in seconds. The whole point of the warm pool, measured."""
+    try:
+        with open(EXPANDS, encoding="utf-8") as f:
+            rows = [json.loads(l) for l in f if l.strip()]
+    except (OSError, ValueError):
+        return "no expansions logged yet"
+    if not rows:
+        return "no expansions logged yet"
+    cold = [r["secs"] for r in rows if not r["warm"]]
+    warm = [r["secs"] for r in rows if r["warm"]]
+    parts = [f"{len(rows)} expansions"]
+    if cold:
+        parts.append(f"cold {statistics.median(cold):.1f}s (n={len(cold)})")
+    if warm:
+        parts.append(f"warm {statistics.median(warm):.1f}s (n={len(warm)})")
+    if cold and warm:
+        parts.append(f"→ {statistics.median(cold) / max(statistics.median(warm), .01):.1f}x")
+    return " · ".join(parts)
 
 
 def _rows():
@@ -104,6 +146,16 @@ def _fit(rows, phase):
            if r.get("minutes", 0) > 0.5 and phase in (r.get("timings") or {})]
     if len(pts) < MIN_SAMPLES:
         return None
+    # One point per length BAND, so eleven 11-minute clips do not outvote the single
+    # 7-minute one, and two feature-length videos do not set the whole line.
+    bands = {}
+    for x, y in pts:
+        bands.setdefault(int(x // 10), []).append((x, y))
+    pts = [(statistics.median([x for x, _ in v]), statistics.median([y for _, y in v]))
+           for v in bands.values()]
+    if len(pts) < 2:
+        x, y = pts[0]
+        return (0.0, y / x)
     n = len(pts)
     mx = sum(x for x, _ in pts) / n
     my = sum(y for _, y in pts) / n
@@ -123,13 +175,19 @@ def _median_rate(rows, phase):
     return statistics.median(vals) if len(vals) >= MIN_SAMPLES else None
 
 
-def _median_load(rows, ctx):
-    """Model load is flat in video length but grows with context, so match on context
-    band first and widen only if that is too thin to be meaningful."""
+def _median_load(rows, ctx, warm=False):
+    """Model load, split by WARM FIRST.
+
+    It is bimodal: 0.0s when the parked server is reused, 5-9s when one has to start. A
+    median across both predicted ~2s and was never right in either case (2026-08-08). Only
+    once warm and cold are separated does the context band mean anything."""
     def loads(pred):
         return [r["timings"]["model load"] for r in pred
                 if "model load" in (r.get("timings") or {})]
 
+    same = [r for r in rows if bool(r.get("warm")) == bool(warm)]
+    if len(loads(same)) >= MIN_SAMPLES:
+        rows = same
     band = loads([r for r in rows if abs(r.get("ctx", 0) - ctx) <= 16384])
     if len(band) >= MIN_SAMPLES:
         return statistics.median(band)
@@ -137,7 +195,7 @@ def _median_load(rows, ctx):
     return statistics.median(allv) if len(allv) >= MIN_SAMPLES else None
 
 
-def learned(power: str, ctx: int) -> dict:
+def learned(power: str, ctx: int, warm: bool = False) -> dict:
     """What the log knows, as {phase: seconds-per-minute} plus {"model load": seconds}.
 
     Missing keys mean "not enough evidence yet" and the caller keeps its own default —
@@ -154,7 +212,7 @@ def learned(power: str, ctx: int) -> dict:
         fit = _fit(src, phase)
         if fit is not None:
             out[phase] = fit                  # (fixed seconds, seconds per minute)
-    load = _median_load(src, ctx)
+    load = _median_load(src, ctx, warm)
     if load is not None:
         out["model load"] = load
     out["_samples"] = len(src)
@@ -210,6 +268,7 @@ if __name__ == "__main__":
     rows = _rows()
     print(summary())
     print(drift())
+    print(expand_report())
     for p, a, e in accuracy()[-8:]:
         print(f"    predicted {p:>6.0f}s   actual {a:>6.0f}s   {e:+.0f}%")
     for phase in SCALING:

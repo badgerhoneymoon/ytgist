@@ -80,7 +80,8 @@ def estimate(minutes: float, cached: bool) -> dict:
     Built-in rates are the FLOOR, not the answer: whatever the timing log has measured on
     this machine, at this power mode, wins. Each finished run makes this sharper."""
     ctx = model_client.ctx_for(int(minutes * 60 * CHARS_PER_SEC / CHARS_PER_TOKEN) + 1400)
-    known = timing_log.learned(timing_log.power_mode(), ctx)
+    known = timing_log.learned(timing_log.power_mode(), ctx,
+                               warm=model_client.warm_available())
 
     def cost(phase):
         """Learned affine cost if we have one, else the hand-fitted per-minute constant."""
@@ -150,9 +151,12 @@ def expand(vid, start, end, headline, body, native=False, log=print):
 
     system = gist_prompt.expand_system_for(native)
     need = len(system + user) // 2 + 600
+    t0 = time.time()
     srv = model_client.Server.acquire(need_tokens=need, model=MODELS["dense"], log=log)
+    warm = getattr(srv, "was_warm", False)
     with srv:
         out = srv.chat(system, user, max_tokens=600, temperature=0.25)
+    timing_log.record_expand((end - start) / 60, len(user), warm, time.time() - t0, native)
     if "NOTHING FURTHER" in out.upper():
         save_expansion(vid, native, start, "")   # "asked, and there is nothing" is an answer
         return ""
@@ -469,7 +473,7 @@ def run(url, model_key="dense", refresh=False, progress=None,
     # would otherwise need to size it. Two chars per token is the Cyrillic rate measured
     # on a real transcript; it over-estimates Latin text, and over-estimating only costs a
     # little unused context, where under-estimating costs a whole halved summary.
-    srv_ctx = 0
+    srv_ctx, srv_warm = 0, False
     est = len(gist_prompt.system_for(native) + user) // 2 + 1400
     with phase("model load"):
         _srv = model_client.Server.acquire(need_tokens=est, model=MODELS[model_key], log=log)
@@ -479,7 +483,7 @@ def run(url, model_key="dense", refresh=False, progress=None,
     # which is the only way to interrupt it that does not require the model to cooperate.
     if control is not None:
         control.server = _srv
-    srv_ctx = _srv.ctx
+    srv_ctx, srv_warm = _srv.ctx, getattr(_srv, "was_warm", False)
     with _srv as srv:
         # The length gate above uses an ESTIMATE; this is the server's own tokeniser
         # having the last word. It should never fire — the estimate deliberately runs
@@ -508,6 +512,7 @@ def run(url, model_key="dense", refresh=False, progress=None,
     images = []
     try:
         import entities
+        _t_img = time.time()
         steps = []
         for block in out.split("**")[1:]:
             m = re.search(r"IMAGE:\s*(.+)", block)
@@ -516,6 +521,7 @@ def run(url, model_key="dense", refresh=False, progress=None,
         images = [st.get("image") for st in steps]
         if any(images):
             log(f"  illustrated {sum(1 for i in images if i)}/{len(images)} steps")
+        timings["images"] = round(time.time() - _t_img, 2)
     except Exception as exc:
         log(f"  images skipped ({exc!r})")
     out = re.sub(r"^\s*IMAGE:.*$", "", out, flags=re.M)   # never show the directive
@@ -539,7 +545,7 @@ def run(url, model_key="dense", refresh=False, progress=None,
                 "sentences": sentences,   # the UI shows the evidence behind each claim
                 "images": images, "expansions": {}}
     timing_log.record(meta.get("duration", 0) / 60, was_cached, srv_ctx, timings, native,
-                      predicted=predicted)
+                      predicted=predicted, warm=srv_warm)
     total = sum(timings.values())
     log("\n  " + " · ".join(f"{k} {v:g}s" for k, v in timings.items())
         + f"  =  {total:.0f}s total")

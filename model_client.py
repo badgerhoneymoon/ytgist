@@ -123,9 +123,17 @@ def _warm_take(model, ctx, log=print):
             _warm["srv"] = None                   # it died while parked
             return None
         _warm["srv"] = None
+        srv.was_warm = True
         log(f"  reusing the warm llama-server on {srv.base} "
             f"({srv.ctx // 1024}k context, prompt cache intact)")
         return srv
+
+
+def warm_available() -> bool:
+    """Is a server parked right now? The ETA needs to know — model load is 0s if so."""
+    with _warm_lock:
+        srv = _warm["srv"]
+        return srv is not None and (srv._proc is None or srv._proc.poll() is None)
 
 
 def warm_stop():
@@ -207,6 +215,7 @@ class Server:
         self.base, self._proc, self.ctx = base, proc, ctx
         self.model = model
         self.borrowed = proc is None
+        self.was_warm = False        # set when handed out of the warm pool, for the log
 
     # ---------------------------------------------------------------- lifecycle
     @classmethod
