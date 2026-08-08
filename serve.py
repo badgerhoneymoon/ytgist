@@ -158,6 +158,13 @@ function drawSteps(current) {
     `<span class="${n < i ? 'done' : n === i ? 'now' : ''}">${label}</span>`).join('');
 }
 
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  n.textContent = text;
+  return n;
+}
+
 async function submit() {
   const url = document.getElementById('url').value;
   if (!url) return;
@@ -177,11 +184,12 @@ async function submit() {
     if (d.pct !== undefined) fill.style.width = d.pct+'%';
     if (d.stage) drawSteps(d.stage === 'cached' ? 'summarise' : d.stage);
     if (d.msg) stage.textContent = d.msg;
-    if (d.error) { stage.textContent=''; out.innerHTML='<p class="err">'+d.error+'</p>';
+    if (d.error) { stage.textContent=''; out.replaceChildren(el('p','err',d.error));
                    finish(); }
     if (d.markdown !== undefined) {
       stage.textContent=''; finish();
-      out.innerHTML = '<h2>'+d.title+'</h2>' + d.markdown;
+      out.replaceChildren(el('h2','',d.title));      // textContent: no markup from a title
+      out.insertAdjacentHTML('beforeend', d.markdown);
       renderTimings(d.timings, d.duration, d.cached);
     }
   };
@@ -439,7 +447,7 @@ class Handler(BaseHTTPRequestHandler):
             if not res:
                 q.put({"error": "No speech was found in that video."})
                 return
-            q.put({"title": html.escape(res["title"]),
+            q.put({"title": res["title"],
                    # RAW markdown for the Next UI, which parses the ** markers itself to
                    # build real components. The pre-rendered HTML below is for the plain
                    # fallback page — sending only that made the React app find zero
@@ -450,19 +458,18 @@ class Handler(BaseHTTPRequestHandler):
                    "duration": res.get("duration", 0),
                    "cached": res.get("cached", False),
                    "sentences": res.get("sentences") or [],
-                   "images": res.get("images") or [],
                    "expansions": res.get("expansions") or {}})
         except ytgist.TooLong as e:
-            q.put({"error": html.escape(str(e))})
+            q.put({"error": str(e)})
         except ytgist.Cancelled:
             # Not an error. Stopping is a legitimate outcome, and dressing it up in red
             # would teach the user that pressing their own Stop button broke something.
             q.put({"stopped": True})
         except ytgist.yt.IngestError as e:
-            q.put({"error": html.escape(str(e))})
+            q.put({"error": str(e)})
         except Exception as e:                      # a crash must reach the page, not just stderr
             traceback.print_exc()
-            q.put({"error": html.escape(f"{type(e).__name__}: {e}")})
+            q.put({"error": f"{type(e).__name__}: {e}"})
 
 
 if __name__ == "__main__":

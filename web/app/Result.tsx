@@ -214,8 +214,7 @@ function Step({
 
   return (
     <li className="group mb-13 grid grid-cols-[3.75rem_minmax(0,1fr)] last:mb-0
-                   max-sm:grid-cols-[minmax(0,1fr)] [&>div]:after:block
-                   [&>div]:after:clear-both [&>div]:after:content-['']">
+                   max-sm:grid-cols-[minmax(0,1fr)]">
       {/* RAIL: number over timestamp, right-aligned to a shared edge. Both are metadata,
           so both live outside the reading column. */}
       <div className="col-start-1 flex flex-col items-end pr-3.5 pt-0.5
@@ -243,28 +242,6 @@ function Step({
         <h3 className="text-[19.5px] font-semibold leading-[1.28] tracking-[-0.006em] text-ink">
           {t.headline}
         </h3>
-
-        {/* FLOATED, not stacked. A block image between headline and body would break the
-            argument in half every time one resolves; floating lets the prose close around
-            it, so a step with a picture and a step without still read as the same object.
-            Small on purpose — these are logos and portraits that identify a subject, not
-            illustrations that carry meaning. */}
-        {t.image && (
-          <figure className="float-right ml-5 mt-3 mb-1 w-[96px] max-sm:w-[76px]">
-            <a href={t.image.href} target="_blank" rel="noopener" title={t.image.label}>
-              <img
-                src={t.image.src}
-                alt={t.image.label}
-                loading="lazy"
-                className="w-full rounded-md border border-line bg-canvas object-contain
-                           transition-opacity duration-150 hover:opacity-85"
-              />
-            </a>
-            <figcaption className="mt-1.5 text-[11px] leading-[1.35] text-soft/70">
-              {t.image.query}
-            </figcaption>
-          </figure>
-        )}
 
         <p className="prose-serif mt-3 font-serif text-[19px] leading-[1.6] text-body">
           {t.body}
@@ -319,10 +296,7 @@ function Step({
           ))}
 
         {t.evidence && (
-          /* clear-right so a floated image narrows the BODY (where wrapping reads as
-             intentional) but never the quote, whose ragged right edge against a
-             half-width block just looks broken. */
-          <div className="clear-right">
+          <div>
             <button
               onClick={() => setOpen((v) => !v)}
               aria-expanded={open}

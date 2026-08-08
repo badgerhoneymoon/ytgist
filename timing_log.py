@@ -32,7 +32,7 @@ KEEP = 200                  # newest N kept; older entries describe a machine lo
 MIN_SAMPLES = 3             # below this, a median is just an anecdote
 
 # Phases whose cost scales with the length of the video.
-SCALING = ("download", "transcribe", "summarise", "images")
+SCALING = ("download", "transcribe", "summarise")
 
 
 def power_mode() -> str:

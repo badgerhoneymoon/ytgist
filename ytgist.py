@@ -45,7 +45,7 @@ CACHE_V = 1
 #
 # These are ESTIMATES SHOWN TO A HUMAN, so they are tuned to run slightly long. An ETA
 # that expires while you are still waiting is worse than one you beat.
-RATE = {"download": 0.30, "transcribe": 0.65, "summarise": 4.2, "images": 0.18}
+RATE = {"download": 0.30, "transcribe": 0.65, "summarise": 4.2}
 
 # THE HARD LIMIT. Beyond the largest context we will start, the only way to proceed is to
 # summarise the transcript in halves and merge — each half written blind to the other, so
@@ -95,14 +95,12 @@ def estimate(minutes: float, cached: bool) -> dict:
         load = load[0] + load[1] * minutes
 
     if cached:
-        return {"model load": load, "summarise": cost("summarise"),
-                "images": cost("images")}
+        return {"model load": load, "summarise": cost("summarise")}
     return {"read info": 2.0,
             "download": cost("download"),
             "transcribe": cost("transcribe"),
             "model load": load,
-            "summarise": cost("summarise"),
-            "images": cost("images")}
+            "summarise": cost("summarise")}
 
 
 EXPAND_MAX = 8 * 60         # a step's span, capped — beyond this it stops being one point
@@ -198,14 +196,9 @@ class TooLong(Exception):
 
 GIST_V = 2          # bump when the PROMPT changes, so old summaries are re-made
 EXP_V = 2           # bump when the EXPAND PROMPT changes; older expansions are dropped
-                    # rather than shown, the same way stale images are — Denis reloaded and
+                    # rather than shown — Denis reloaded and
                     # still saw "the speaker, the speaker, the speaker" because those were
                     # written before the rule existed (2026-08-08)
-IMG_V = 2           # bump when the IMAGE RESOLVER changes; older images are dropped, not
-                    # shown — a saved summary keeps its text but loses pictures resolved
-                    # by a design we no longer trust (the Hallowe'en apple-bobbing next to
-                    # a claim about Yabloko survived two fixes because it was already on
-                    # disk, 2026-08-08)
 
 MODELS = {
     "dense": os.path.expanduser("~/models/Qwen3.6-27B-UD-Q5_K_XL.gguf"),
@@ -274,8 +267,6 @@ def load_summary(vid, native=False):
             d = json.load(f)
         if d.get("gist_v") != GIST_V:
             return None
-        if d.get("img_v") != IMG_V:
-            d["images"] = []
         if d.get("exp_v") != EXP_V:
             d["expansions"] = {}
         return d
@@ -459,7 +450,6 @@ def run(url, model_key="dense", refresh=False, progress=None,
                     "raw": saved["text"], "dropped": 0, "video_id": vid,
                     "timings": {}, "duration": meta.get("duration", 0),
                     "cached": True, "sentences": sentences, "from_saved": True,
-                    "images": saved.get("images") or [],
                     "expansions": saved.get("expansions") or {}}
         return 0
 
@@ -506,29 +496,6 @@ def run(url, model_key="dense", refresh=False, progress=None,
                     raise Cancelled()
                 raise
 
-    # IMAGE: lines → real pictures. AFTER generation, so a slow lookup never delays the
-    # text, and silent on failure: a step with no resolvable subject simply has no image,
-    # which is the right outcome for "anxiety rose to 57%".
-    images = []
-    try:
-        import entities
-        _t_img = time.time()
-        steps = []
-        for block in out.split("**")[1:]:
-            m = re.search(r"IMAGE:\s*(.+)", block)
-            steps.append({"image_query": (m.group(1).strip() if m else "")})
-        named = sum(1 for st in steps if st["image_query"]
-                    and st["image_query"].split("|")[0].strip().lower() not in ("none", "нет", "-"))
-        step("images", 96, f"looking up {named} subject{'s' if named != 1 else ''}")
-        entities.illustrate_named(steps)
-        images = [st.get("image") for st in steps]
-        if any(images):
-            log(f"  illustrated {sum(1 for i in images if i)}/{len(images)} steps")
-        timings["images"] = round(time.time() - _t_img, 2)
-    except Exception as exc:
-        log(f"  images skipped ({exc!r})")
-    out = re.sub(r"^\s*IMAGE:.*$", "", out, flags=re.M)   # never show the directive
-
     step("done", 100, "")
 
     was_cached = bool(timings.pop("_cached", False))   # popped BEFORE any consumer
@@ -541,14 +508,14 @@ def run(url, model_key="dense", refresh=False, progress=None,
         log(f"\n  ({dropped} invented timestamp(s) removed — the text was kept)")
     save_summary(vid, native=native, payload={
                            "gist_v": GIST_V, "text": text, "at": time.time(),
-                           "title": meta.get("title", ""), "images": images,
-                           "img_v": IMG_V, "exp_v": EXP_V, "native": bool(native),
+                           "title": meta.get("title", ""),
+                           "exp_v": EXP_V, "native": bool(native),
                            "duration": meta.get("duration", 0)})
     run.last = {"title": meta.get("title", ""), "markdown": text, "dropped": dropped,
                 "video_id": vid, "timings": timings,
                 "duration": meta.get("duration", 0), "cached": was_cached,
                 "sentences": sentences,   # the UI shows the evidence behind each claim
-                "images": images, "expansions": {}}
+                "expansions": {}}
     timing_log.record(meta.get("duration", 0) / 60, was_cached, srv_ctx, timings, native,
                       predicted=predicted, warm=srv_warm)
     total = sum(timings.values())

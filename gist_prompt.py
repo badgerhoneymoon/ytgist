@@ -72,22 +72,6 @@ Someone reading the sentences should understand WHY each step follows.
 
 Put the [MM:SS] at the end of the headline line, copied exactly from the transcript.
 
-After each step's sentences, add ONE line naming the thing to illustrate, in the form
-IMAGE: <name> | <what kind of thing it is, 2-4 words>
-or exactly "IMAGE: none".
-
-The second half is not optional and not a description — it is how the right thing gets
-found. "Yabloko" alone finds a fruit; "Yabloko | political party" finds the party. "FOM"
-alone finds a fungus. Write the kind the way an encyclopedia would: "political party",
-"politician", "online retailer", "government ministry", "polling organisation".
-
-Say "none" whenever the step is about a feeling, a trend, a statistic, a plan or an idea.
-There is no photograph of "rising anxiety", and illustrating it with a stock crowd would
-imply something the speaker never said. Name only real, nameable things: a person, an
-organisation, a party, a company, a place. Use the name as an encyclopedia would title it
-(a person's full name, an organisation's real name — "Public Opinion Foundation", not
-"FOM"). If you are not sure it is a real named entity, say "none".
-
 Open with a TL;DR before step 1 — and apply the SAME sentence rule to it. The steps got
 short sentences while the TL;DR stayed one clause-chained monster, which reads as a wall
 however short it is (Denis, 2026-08-08):
@@ -185,14 +169,14 @@ ENGLISH_RULE = (
     "\n\nLANGUAGE, again: the **bold headlines** too, not only the sentences under them. "
     "Write every headline and every body sentence in ENGLISH, even when "
     "the transcript is in another language. Translate the ideas; keep names as they are "
-    "normally written in English. The IMAGE: lines stay in English too."
+    "normally written in English."
 )
 
 NATIVE_RULE = (
     "\n\nLANGUAGE, again: the **bold headlines** too, not only the sentences under them. "
     "Write every headline and every body sentence in the SAME language "
     "the transcript is in. Do not translate to English. Keep the numbering, the [MM:SS] "
-    "markers and the IMAGE: lines exactly as specified above."
+    "markers exactly as specified above."
 )
 
 
