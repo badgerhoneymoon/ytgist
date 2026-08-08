@@ -101,21 +101,6 @@ TRANSCRIPT
 {transcript}
 >>>"""
 
-ASK_USER = """Answer the question using only this transcript. Cite [MM:SS] markers copied
-exactly from it. If the transcript does not answer the question, say so plainly.
-
-Write plain paragraphs. No headings, no bold, no bullet lists — this is read as prose, and
-a heading above a three-sentence answer is furniture. Cite where the claim is made, not
-after every sentence.
-
-QUESTION: {question}
-
-TRANSCRIPT
-<<<
-{transcript}
->>>"""
-
-
 def format_transcript(sentences) -> str:
     """[MM:SS] or [H:MM:SS] per sentence — the only timestamps the model may cite."""
     return "\n".join(f"[{stamp(s['start'])}] {s['text'].strip()}"

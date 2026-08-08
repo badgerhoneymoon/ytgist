@@ -17,8 +17,6 @@ export type Frame = {
   eta?: Record<string, number>;   // seconds per remaining phase, sent once length is known
   video_minutes?: number;
   // final frame only
-  kind?: "gist" | "answer";
-  question?: string;
   title?: string;
   markdown?: string;
   raw?: string;          // unrendered — what the UI parses
@@ -66,10 +64,3 @@ export type Gist = {
 /** A cited moment inside an answer: the model wrote [MM:SS], the engine verified it
  *  against the transcript and turned it into a link. */
 export type Cite = { stamp: string; href: string };
-
-/** An answer to a question. Paragraphs of text with citations inline, because a timestamp
- *  belongs where the claim is made, not in a footnote at the end. */
-export type Answer = {
-  question: string;
-  paragraphs: (string | Cite)[][];
-};

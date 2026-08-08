@@ -15,11 +15,13 @@ THE RULES, each one from a review finding or a measurement:
   • Never leave a server running. Started in its own process group; killed as a group so
     llama-server's children go too.
 """
+import atexit
 import json
 import os
 import signal
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -74,6 +76,90 @@ def _free_port() -> int:
 ALIAS = "ytgist-owned"          # the marker that makes orphan cleanup safe
 
 
+# ------------------------------------------------------------------- the warm pool
+#
+# ONE server may outlive its job, for a few minutes, so that consecutive work over the same
+# transcript reuses the prefix llama.cpp has already processed. The whole cost of expanding
+# a takeaway on a long video is prefill — 44k tokens on an 87-minute interview — and paying
+# it again per click is the difference between two minutes and two seconds.
+#
+# The risk this reintroduces is the one we spent the morning fixing: a 20GB process nobody
+# owns. So the pool holds at most ONE server, a daemon reaper stops it after IDLE seconds,
+# and it is registered with atexit — an engine restart never leaves it behind.
+IDLE = 300                   # seconds a released server stays warm
+
+_warm = {"srv": None, "until": 0.0}
+_warm_lock = threading.Lock()
+
+
+def _warm_put(srv):
+    """Keep a finished server alive instead of killing it."""
+    if srv is None or srv._proc is None:          # borrowed servers are not ours to hold
+        return
+    with _warm_lock:
+        old = _warm["srv"]
+        if old is not None and old is not srv:
+            old.stop()                            # never more than one
+        _warm["srv"] = srv
+        _warm["until"] = time.time() + IDLE
+    _reaper_start()
+
+
+def _warm_take(model, ctx, log=print):
+    """A warm server, if it fits this job. Context must be big enough; the model must match."""
+    with _warm_lock:
+        srv = _warm["srv"]
+        if srv is None:
+            return None
+        if srv.model != model or srv.ctx < ctx:
+            srv.stop()
+            _warm["srv"] = None
+            return None
+        if srv._proc is not None and srv._proc.poll() is not None:
+            _warm["srv"] = None                   # it died while parked
+            return None
+        _warm["srv"] = None
+        log(f"  reusing the warm llama-server on {srv.base} "
+            f"({srv.ctx // 1024}k context, prompt cache intact)")
+        return srv
+
+
+def warm_stop():
+    with _warm_lock:
+        srv, _warm["srv"] = _warm["srv"], None
+    if srv is not None:
+        srv.stop()
+
+
+def _reap():
+    while True:
+        time.sleep(5)
+        with _warm_lock:
+            srv, until = _warm["srv"], _warm["until"]
+            if srv is None:
+                return
+            if time.time() < until:
+                continue
+            _warm["srv"] = None
+        srv.stop()
+        return
+
+
+_reaper = {"t": None}
+
+
+def _reaper_start():
+    with _warm_lock:
+        t = _reaper["t"]
+        if t is not None and t.is_alive():
+            return
+        _reaper["t"] = threading.Thread(target=_reap, daemon=True)
+        _reaper["t"].start()
+
+
+atexit.register(warm_stop)
+
+
 def sweep_orphans(log=print) -> int:
     """Kill llama-servers WE started that outlived their run.
 
@@ -92,7 +178,12 @@ def sweep_orphans(log=print) -> int:
     try:
         out = sp.run(["pgrep", "-f", f"llama-server .*--alias {ALIAS}"],
                      capture_output=True, text=True).stdout
+        with _warm_lock:
+            warm = _warm["srv"]
+            keep = warm._proc.pid if (warm is not None and warm._proc is not None) else -1
         for pid in [int(x) for x in out.split() if x.strip().isdigit()]:
+            if pid == keep:
+                continue                          # ours, parked on purpose
             try:
                 os.kill(pid, signal.SIGTERM)
                 killed += 1
@@ -108,13 +199,17 @@ def sweep_orphans(log=print) -> int:
 class Server:
     """Either a borrowed server (we leave it alone) or one we own (we stop it)."""
 
-    def __init__(self, base: str, proc=None, ctx: int = CTX):
+    def __init__(self, base: str, proc=None, ctx: int = CTX, model: str = MODEL):
         self.base, self._proc, self.ctx = base, proc, ctx
+        self.model = model
         self.borrowed = proc is None
 
     # ---------------------------------------------------------------- lifecycle
     @classmethod
     def acquire(cls, need_tokens: int = 0, model: str = MODEL, log=print):
+        warm = _warm_take(model, ctx_for(need_tokens), log)
+        if warm:
+            return warm
         borrowed = cls._try_borrow(need_tokens, model, log)
         if borrowed:
             return borrowed
@@ -155,7 +250,10 @@ class Server:
         # q8_0 KV cache roughly halves the memory a large context costs, at a quality
         # difference not measurable on summarisation. It requires flash attention, which
         # is already on.
+        # --cache-reuse lets the server keep a prompt prefix it has already processed, so
+        # a second call over the same transcript skips straight to the new tail.
         cmd = ["llama-server", "-m", model, "-c", str(ctx), "-fa", "on", "-np", "1",
+               "--cache-reuse", "256",
                "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
                "--port", str(port), "--reasoning", "off", "--alias", ALIAS]
         log(f"  starting llama-server on :{port} with a {ctx // 1024}k context "
@@ -170,7 +268,9 @@ class Server:
                                  "(run it by hand to see why)")
             try:
                 if _get(base, "/health", timeout=2).get("status") == "ok":
-                    return cls(base, proc=proc, ctx=ctx)
+                    srv = cls(base, proc=proc, ctx=ctx)
+                    srv.model = model
+                    return srv
             except Exception:
                 time.sleep(1)
         cls(base, proc=proc).stop()
@@ -196,7 +296,11 @@ class Server:
         return self
 
     def __exit__(self, *exc):
-        self.stop()
+        # Released to the warm pool, not killed. Expanding a takeaway re-reads the same
+        # transcript prefix every time, and llama.cpp can reuse a cached prefix — but only
+        # if the process that holds it is still alive. Killing it after every job threw
+        # that away and made each expansion pay the full prefill again.
+        _warm_put(self)
         return False
 
     # ------------------------------------------------------------------- calls

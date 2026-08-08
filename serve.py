@@ -16,6 +16,7 @@ import os
 import queue
 import re
 import sys
+import signal
 import threading
 import time
 import traceback
@@ -77,8 +78,6 @@ PAGE = """<!doctype html>
   button:disabled { opacity:.45; cursor:default; }
   .row { display:flex; gap:10px; margin-top:10px; align-items:center; }
   .row input { flex:1; }
-  #askgo { background:transparent; color:var(--ink); border:1px solid var(--line); }
-  #askgo:hover:not(:disabled) { border-color:var(--ink); }
   #bar { height:4px; background:var(--line); border-radius:2px; margin:26px 0 14px;
        overflow:hidden; display:none; }
   #fill { height:100%; width:0; background:var(--accent); transition:width .5s ease; }
@@ -133,8 +132,6 @@ PAGE = """<!doctype html>
     <button id="go">Gist</button>
   </form>
   <div class="row">
-    <input id="ask" type="text" placeholder="ask something about this video">
-    <button id="askgo" type="button">Ask</button>
   </div>
   <div id="bar"><div id="fill"></div></div>
   <div id="steps"></div>
@@ -142,13 +139,12 @@ PAGE = """<!doctype html>
   <div id="out"></div>
   <div id="timing"></div>
   <p class="note">Audio only, transcribed and summarised on this Mac. Transcripts are
-     cached, so a second question about the same video is instant.</p>
+     cached, so a repeat of the same video is instant.</p>
 </main>
 <script>
 const f=document.getElementById('f'), out=document.getElementById('out'),
       bar=document.getElementById('bar'), fill=document.getElementById('fill'),
       stage=document.getElementById('stage'), go=document.getElementById('go'),
-      askBox=document.getElementById('ask'), askGo=document.getElementById('askgo'),
       steps=document.getElementById('steps');
 
 // The stages, in the order they happen. Naming them beats a bare percentage: "40%" tells
@@ -162,19 +158,19 @@ function drawSteps(current) {
     `<span class="${n < i ? 'done' : n === i ? 'now' : ''}">${label}</span>`).join('');
 }
 
-async function submit(question) {
+async function submit() {
   const url = document.getElementById('url').value;
   if (!url) return;
   out.innerHTML=''; document.getElementById('timing').innerHTML='';
   bar.style.display='block'; fill.style.width='0';
-  go.disabled = askGo.disabled = true;
-  stage.textContent = question ? 'answering your question…' : 'starting…';
+  go.disabled = true;
+  stage.textContent = 'starting…';
   drawSteps('check');
   const r = await fetch('/api/gist', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({url, ask: question || ''})});
+      body: JSON.stringify({url})});
   const {job} = await r.json();
   const es = new EventSource('/api/events?job='+job);
-  const finish = () => { es.close(); go.disabled = askGo.disabled = false;
+  const finish = () => { es.close(); go.disabled = false;
                          bar.style.display='none'; steps.innerHTML=''; };
   es.onmessage = ev => {
     const d = JSON.parse(ev.data);
@@ -193,8 +189,6 @@ async function submit(question) {
 }
 
 f.onsubmit = e => { e.preventDefault(); submit(''); };
-askGo.onclick = () => submit(askBox.value.trim());
-askBox.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); submit(askBox.value.trim()); } };
 
 // Where the time actually went. A stacked bar makes the imbalance obvious at a glance —
 // on a cached video the summary IS the whole cost, which no list of numbers conveys.
@@ -434,8 +428,7 @@ class Handler(BaseHTTPRequestHandler):
 
             threading.Thread(target=beat, daemon=True).start()
             try:
-                ytgist.run(req.get("url", ""), req.get("ask") or None,
-                           req.get("model", "dense"),
+                ytgist.run(req.get("url", ""), req.get("model", "dense"),
                            refresh=bool(req.get("refresh")), progress=progress,
                            native=bool(req.get("native")),
                            regen=bool(req.get("regen")), control=ctl)
@@ -447,8 +440,6 @@ class Handler(BaseHTTPRequestHandler):
                 q.put({"error": "No speech was found in that video."})
                 return
             q.put({"title": html.escape(res["title"]),
-                   "kind": res.get("kind", "gist"),
-                   "question": html.escape(res.get("question", "")),
                    # RAW markdown for the Next UI, which parses the ** markers itself to
                    # build real components. The pre-rendered HTML below is for the plain
                    # fallback page — sending only that made the React app find zero
@@ -475,6 +466,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    # SIGTERM must unwind, not vanish. The engine now PARKS a 21GB llama-server between
+    # jobs, and atexit only runs on a normal interpreter exit — so a plain `pkill` left the
+    # parked server orphaned, which is the exact failure the warm pool was supposed to be
+    # safe against (measured, 2026-08-08). Turning the signal into sys.exit runs atexit,
+    # which stops it.
+    for _sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(_sig, lambda *_: sys.exit(0))
+
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"ytgist → http://127.0.0.1:{PORT}   (ctrl-c to stop)")
     try:

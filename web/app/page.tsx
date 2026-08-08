@@ -1,9 +1,8 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import type { Answer as AnswerT, Frame, Gist, Stage } from "./types";
-import { parseAnswer, parseGist } from "./parse";
-import Answer from "./Answer";
+import type { Frame, Gist, Stage } from "./types";
+import { parseGist } from "./parse";
 import History from "./History";
 import Preview from "./Preview";
 import Progress from "./Progress";
@@ -38,14 +37,10 @@ function parseYouTube(raw: string): string | null {
 
 export default function Home() {
   const [url, setUrl] = useState("");
-  const [question, setQuestion] = useState("");
   const [stage, setStage] = useState<Stage | null>(null);
   const [pct, setPct] = useState(0);
   const [msg, setMsg] = useState("");
   const [gist, setGist] = useState<Gist | null>(null);
-  // Answers STACK and never displace the summary — asking a follow-up should not cost you
-  // the thing you were reading. Newest first, because that is the one you just asked for.
-  const [answers, setAnswers] = useState<AnswerT[]>([]);
   const [error, setError] = useState("");
   const busy = stage !== null;
 
@@ -76,10 +71,8 @@ export default function Home() {
     setPct(0);
     setMsg("");
     setGist(null);
-    setAnswers([]);
     setError("");
     setUrl("");
-    setQuestion("");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }, []);
 
@@ -93,29 +86,24 @@ export default function Home() {
 
   const start = useCallback(
     async (
-      ask: string,
       mode: "" | "regen" | "refresh" = "",
       urlOverride?: string,
       nativeOverride?: boolean,
     ) => {
       const target = (urlOverride ?? url).trim();
       if (!target || busy) return;
-      if (!ask) {
-        setGist(null);
-        setAnswers([]);       // a new gist is a new subject; old answers are about the old one
-      }
+      setGist(null);
       setError("");
       setPct(0);
       setStage("check");
       setEta(null);
-      setMsg(ask ? "answering your question" : "starting");
+      setMsg("starting");
 
       const res = await fetch(`${ENGINE}/api/gist`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           url: target,
-          ask,
           native: nativeOverride ?? native,
           regen: mode === "regen",       // new summary, transcript reused
           refresh: mode === "refresh",   // download and transcribe again too
@@ -163,13 +151,9 @@ export default function Home() {
         }
         if (f.stopped) done();
         if (f.markdown !== undefined) {
-          if (f.kind === "answer") {
-            setAnswers((a) => [{ ...parseAnswer(f), question: ask }, ...a]);
-          } else {
-            const id = parseYouTube(target) ?? target.match(YT_ID)?.[1] ?? "";
-            setGist(parseGist(f, id));
-            setLibKey((k) => k + 1);
-          }
+          const id = parseYouTube(target) ?? target.match(YT_ID)?.[1] ?? "";
+          setGist(parseGist(f, id));
+          setLibKey((k) => k + 1);
           done();
         }
       };
@@ -235,7 +219,7 @@ export default function Home() {
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          start("");
+          start();
         }}
         className="flex flex-wrap gap-2.5"
       >
@@ -321,36 +305,6 @@ export default function Home() {
       )}
       <Preview videoId={videoId ?? ""} />
 
-      <div className="mt-2.5 flex gap-2.5">
-        <input
-          value={question}
-          onChange={(e) => setQuestion(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              start(question.trim());
-            }
-          }}
-          placeholder="…or ask something about it"
-          className="flex-1 rounded-xl border border-line bg-transparent px-4 py-3 text-[15px]
-                     outline-none transition-[border-color,box-shadow] duration-150
-                     placeholder:text-soft/60
-                     focus:border-accent focus:shadow-[0_0_0_3px_rgba(194,87,26,0.14)]"
-          style={{ transitionTimingFunction: "var(--ease-out-expo)" }}
-        />
-        <button
-          type="button"
-          onClick={() => start(question.trim())}
-          disabled={busy || !videoId || !question.trim()}
-          className="rounded-xl border border-line px-6 py-3 text-[15px] font-semibold
-                     transition-[border-color,transform] duration-150 hover:border-ink
-                     active:scale-[0.985] disabled:opacity-30
-                     focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-        >
-          Ask
-        </button>
-      </div>
-
       {busy && <Progress stage={stage} pct={pct} msg={msg} eta={eta} onCancel={cancel} />}
 
       {error && (
@@ -359,15 +313,11 @@ export default function Home() {
         </p>
       )}
 
-      {answers.map((a, i) => (
-        <Answer key={answers.length - i} answer={a} />
-      ))}
-
       {gist && (
         <Result
           gist={gist}
-          onRegenerate={() => start("", "regen")}
-          onRetranscribe={() => start("", "refresh")}
+          onRegenerate={() => start("regen")}
+          onRetranscribe={() => start("refresh")}
         />
       )}
 
@@ -381,7 +331,7 @@ export default function Home() {
             setNative(wantNative);      // keep the toggle honest about what is on screen
             setGist(null);
             window.scrollTo({ top: 0, behavior: "smooth" });
-            start("", "", u, wantNative);
+            start("", u, wantNative);
           }}
         />
       )}

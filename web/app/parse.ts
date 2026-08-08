@@ -1,4 +1,4 @@
-import type { Answer, Cite, Frame, Gist, Sentence, StepImage, Takeaway } from "./types";
+import type { Cite, Frame, Gist, Sentence, StepImage, Takeaway } from "./types";
 
 /** The model returns text; the UI wants structure. Parsing here — rather than asking the
  *  model for JSON — keeps the prompt about WRITING WELL instead of about syntax, and a
@@ -108,13 +108,6 @@ function evidenceAt(sentences: Sentence[], seconds: number): string {
  *  syntax — rather than matching the bare [MM:SS] — is what stops the URL leaking into the
  *  prose, which is exactly the bug the takeaway parser had.
  */
-export function parseAnswer(f: Frame): Answer {
-  return {
-    question: f.question ?? "",
-    paragraphs: parseCited(f.raw ?? f.markdown ?? ""),
-  };
-}
-
 /** Prose with verified [MM:SS] links, split into paragraphs with the citations lifted out.
  *
  *  Shared by answers and by step expansions. Rendering either as a plain string dumps the

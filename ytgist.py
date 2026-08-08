@@ -45,7 +45,7 @@ CACHE_V = 1
 #
 # These are ESTIMATES SHOWN TO A HUMAN, so they are tuned to run slightly long. An ETA
 # that expires while you are still waiting is worse than one you beat.
-RATE = {"download": 0.30, "transcribe": 0.65, "summarise": 4.2, "answer": 1.3}
+RATE = {"download": 0.30, "transcribe": 0.65, "summarise": 4.2}
 
 # THE HARD LIMIT. Beyond the largest context we will start, the only way to proceed is to
 # summarise the transcript in halves and merge — each half written blind to the other, so
@@ -74,7 +74,7 @@ def _refuse_if_too_long(minutes: float):
         )
 
 
-def estimate(minutes: float, cached: bool, ask: bool = False) -> dict:
+def estimate(minutes: float, cached: bool) -> dict:
     """Seconds per remaining phase for a video of this length.
 
     Built-in rates are the FLOOR, not the answer: whatever the timing log has measured on
@@ -85,17 +85,13 @@ def estimate(minutes: float, cached: bool, ask: bool = False) -> dict:
     rate.update({k: v for k, v in known.items() if k in RATE})
     load = known.get("model load", LOAD_BASE + LOAD_PER_MIN * minutes)
 
-    # Answering is dominated by PREFILL — reading the transcript — where summarising also
-    # pays to write seventeen steps. Same input, a fraction of the output.
-    work = ({"answer": rate["answer"] * minutes} if ask
-            else {"summarise": rate["summarise"] * minutes})
     if cached:
-        return {"model load": load, **work}
+        return {"model load": load, "summarise": rate["summarise"] * minutes}
     return {"read info": 2.0,
             "download": rate["download"] * minutes,
             "transcribe": rate["transcribe"] * minutes,
             "model load": load,
-            **work}
+            "summarise": rate["summarise"] * minutes}
 
 
 EXPAND_MAX = 8 * 60         # a step's span, capped — beyond this it stops being one point
@@ -323,7 +319,7 @@ def transcribe(wav_path):
 
 
 # ------------------------------------------------------------------------ main
-def run(url, question=None, model_key="dense", refresh=False, progress=None,
+def run(url, model_key="dense", refresh=False, progress=None,
         native=False, regen=False, control=None):
     timings = {}                 # phase → seconds; the UI draws these as a stacked bar
     predicted = {}               # what we TOLD the user it would take, kept for scoring
@@ -362,7 +358,7 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None,
         log(f"→ cached transcript for {vid} ({len(cached['sentences'])} segments)")
         step("cached", 70, f"cached transcript, {len(cached['sentences'])} segments")
         _refuse_if_too_long(cached.get("duration", 0) / 60)
-        predicted = estimate(cached.get("duration", 0) / 60, True, bool(question))
+        predicted = estimate(cached.get("duration", 0) / 60, True)
         if progress:
             progress({"eta": predicted,
                       "video_minutes": round(cached.get("duration", 0) / 60)})
@@ -376,7 +372,7 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None,
         mins = info["duration"] / 60
         log(f"   {gist_prompt.sanitize(info['title'])}  ({mins:.0f} min)")
         _refuse_if_too_long(mins)
-        predicted = estimate(mins, False, bool(question))
+        predicted = estimate(mins, False)
         if progress:
             progress({"eta": predicted, "video_minutes": round(mins)})
         d = yt.temp_dir(TMP)
@@ -406,7 +402,7 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None,
         log("✗ no speech found in that video.")
         return 1
 
-    saved = None if (refresh or regen or question) else load_summary(vid, native)
+    saved = None if (refresh or regen) else load_summary(vid, native)
     if saved:
         step("done", 100, "")
         log("  using the saved summary (regenerate to make a new one)")
@@ -419,16 +415,12 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None,
         return 0
 
     transcript = gist_prompt.format_transcript(sentences)
-    user = (gist_prompt.ASK_USER.format(question=question, transcript=transcript)
-            if question else gist_prompt.GIST_USER.format(
-                transcript=transcript,
-                steps=gist_prompt.steps_for(meta.get("duration", 0) / 60)))
+    user = gist_prompt.GIST_USER.format(
+        transcript=transcript,
+        steps=gist_prompt.steps_for(meta.get("duration", 0) / 60))
     user += gist_prompt.NATIVE_RULE if native else gist_prompt.ENGLISH_RULE
 
-    if question:
-        step("answer", 75, "reading the transcript to answer you")
-    else:
-        step("summarise", 75, "27B, one pass over the whole transcript")
+    step("summarise", 75, "27B, one pass over the whole transcript")
     log("→ summarising …")
     # Estimated BEFORE the server exists, because the server's own tokeniser is what we
     # would otherwise need to size it. Two chars per token is the Cyrillic rate measured
@@ -457,8 +449,13 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None,
                 f"will start holds {srv.ctx:,}. Refusing rather than summarising it in "
                 f"halves, which loses whatever connects the two."
             )
-        with phase("answer" if question else "summarise"):
-            out = srv.chat(gist_prompt.system_for(native), user)
+        with phase("summarise"):
+            try:
+                out = srv.chat(gist_prompt.system_for(native), user)
+            except Exception:
+                if control is not None and control.cancelled.is_set():
+                    raise Cancelled()
+                raise
 
     step("done", 100, "")
 
@@ -488,14 +485,12 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None,
     print(gist_prompt.sanitize(text))
     if dropped:
         log(f"\n  ({dropped} invented timestamp(s) removed — the text was kept)")
-    if not question:
-        save_summary(vid, native=native, payload={
+    save_summary(vid, native=native, payload={
                            "gist_v": GIST_V, "text": text, "at": time.time(),
                            "title": meta.get("title", ""), "images": images,
                            "img_v": IMG_V, "native": bool(native),
                            "duration": meta.get("duration", 0)})
     run.last = {"title": meta.get("title", ""), "markdown": text, "dropped": dropped,
-                "kind": "answer" if question else "gist", "question": question or "",
                 "video_id": vid, "timings": timings,
                 "duration": meta.get("duration", 0), "cached": was_cached,
                 "sentences": sentences,   # the UI shows the evidence behind each claim
@@ -511,7 +506,6 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None,
 def main():
     ap = argparse.ArgumentParser(description="YouTube → gist with timestamps")
     ap.add_argument("url")
-    ap.add_argument("--ask", help="ask a question about the video instead of a gist")
     ap.add_argument("--model", choices=sorted(MODELS), default="dense")
     ap.add_argument("--refresh", action="store_true", help="ignore any cached transcript")
     ap.add_argument("--regen", action="store_true",
@@ -525,7 +519,7 @@ def main():
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: sys.exit(130))
     try:
-        return run(a.url, a.ask, a.model, a.refresh, native=a.native, regen=a.regen)
+        return run(a.url, a.model, a.refresh, native=a.native, regen=a.regen)
     except yt.IngestError as e:
         log(f"✗ {e}")
         return 2

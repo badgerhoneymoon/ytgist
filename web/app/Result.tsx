@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { ChevronDown, Loader2, RefreshCw, RotateCcw } from "lucide-react";
 import type { Gist, Takeaway } from "./types";
-import { Cited } from "./Answer";
+import Cited from "./Cited";
 import { parseCited } from "./parse";
 
 /** The reading surface.
