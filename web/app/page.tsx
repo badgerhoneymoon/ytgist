@@ -316,6 +316,7 @@ export default function Home() {
       {gist && (
         <Result
           gist={gist}
+          native={native}
           onRegenerate={() => start("regen")}
           onRetranscribe={() => start("refresh")}
         />

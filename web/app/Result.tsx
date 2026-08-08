@@ -22,10 +22,12 @@ import { parseCited } from "./parse";
  */
 export default function Result({
   gist,
+  native,
   onRegenerate,
   onRetranscribe,
 }: {
   gist: Gist;
+  native: boolean;
   onRegenerate: () => void;
   onRetranscribe: () => void;
 }) {
@@ -51,6 +53,7 @@ export default function Result({
             n={i + 1}
             t={t}
             videoId={gist.videoId}
+            native={native}
             // The step's span is from its own timestamp to the NEXT one — the argument's
             // own structure decides the window, not a guess about how much to read.
             until={gist.takeaways[i + 1]?.seconds ?? null}
@@ -166,11 +169,13 @@ function Step({
   n,
   t,
   videoId,
+  native,
   until,
 }: {
   n: number;
   t: Takeaway;
   videoId: string;
+  native: boolean;
   until: number | null;
 }) {
   // OPEN BY DEFAULT (Denis, 2026-08-08). The evidence is the reason to trust the claim;
@@ -193,7 +198,7 @@ function Step({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          video: videoId, start: t.seconds, end: until,
+          video: videoId, start: t.seconds, end: until, native,
           headline: t.headline, body: t.body,
         }),
       });
