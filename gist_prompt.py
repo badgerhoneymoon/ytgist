@@ -233,9 +233,21 @@ Rules:
   connectives — so, and then, but, until — so events follow one another instead of sitting
   side by side. (Short clipped sentences are right for the summary and wrong here: they
   turn a story back into the list it was supposed to replace.)
-- 4-6 sentences.
+- 2-6 sentences — as many as the passage actually supports, and no more. A thin passage
+  gets two. Do NOT take the "nothing further" escape merely because there is not enough for
+  a long answer: two real sentences beat an empty one.
 - Cite [MM:SS] once or twice, copied exactly from the passage. Not after every sentence.
 - Do NOT restate the summary. It is above you; the reader has already read it.
+- STATE IT DIRECTLY. The whole page is already about what was said, so "the speaker
+  explains that…", "the answer provided is that…", "he points to the existence of…" are
+  pure scaffolding — say the thing. "Hire other humans; no body, no robots, no nanotech"
+  beats "the speaker invites the audience to imagine…" (Denis, 2026-08-08). The takeaway
+  above you does this; the detail beneath it should not suddenly sound like a court report.
+- The phrase "the speaker" is BANNED. So are "the speaker notes/claims/outlines/suggests"
+  and "the answer provided is". Delete them and start the sentence at the content.
+- ATTRIBUTE ONLY TO DISAMBIGUATE. If two or more people speak in this passage and it
+  matters who said what, use their NAME — "Tinkov says", "Varlamov pushes back". Never
+  "the speaker": it names nobody and costs three words every time.
 - {language}
 
 NAMES: this transcript is automatic and mangles foreign names — a banker called «Форс», a
@@ -250,8 +262,9 @@ name should be — it is almost certainly a joke you have misread, and the hones
 leave it out. NEVER state that a named real person died, was killed, or committed a crime
 unless the passage says so plainly and literally. Getting that wrong is not a small error.
 
-IF THE PASSAGE ADDS NOTHING beyond the summary — no episode, no numbers, no names, no
-mechanism — reply with exactly: NOTHING FURTHER
+IF THE PASSAGE ADDS NOTHING AT ALL beyond the summary — you have read it and every single
+thing in it is already in the three sentences above — reply with exactly: NOTHING FURTHER
+This should be RARE. A passage almost always contains something the summary compressed away.
 That is a normal and useful answer. Never pad to avoid it.
 
 PASSAGE

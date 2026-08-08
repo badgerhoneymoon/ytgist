@@ -1,8 +1,7 @@
 /** The shapes the Python engine streams over SSE. Kept in one file so the UI and the
  *  backend contract are visible in a single place. */
 
-export type Stage =
-  | "check" | "download" | "transcribe" | "summarise" | "answer" | "cached" | "done";
+export type Stage = "check" | "download" | "transcribe" | "summarise" | "cached" | "done";
 
 export type Sentence = { start: number; end: number; text: string };
 

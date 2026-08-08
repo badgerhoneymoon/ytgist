@@ -95,6 +95,13 @@ def estimate(minutes: float, cached: bool) -> dict:
 
 
 EXPAND_MAX = 8 * 60         # a step's span, capped — beyond this it stops being one point
+# And a FLOOR. Takeaways cluster at the start of a video, so step 1 of one talk spanned
+# 00:09 → 00:32 — 23 seconds, 404 characters — and the model quite reasonably reported
+# "nothing further" while the passage plainly contained the thousand-IQ-versus-million-IQ
+# point and the "is it already smarter and hiding it" exchange (Denis spotted it,
+# 2026-08-08). Overlapping into the next step is a far smaller cost than having nothing to
+# read: the summary of that next step is not shown to this call anyway.
+EXPAND_MIN = 60
 
 
 def save_expansion(vid, native, start, text):
@@ -106,6 +113,7 @@ def save_expansion(vid, native, start, text):
     saved = load_summary(vid, native)
     if not saved:
         return
+    saved["exp_v"] = EXP_V
     saved.setdefault("expansions", {})[str(int(start))] = text
     save_summary(vid, saved, native)
 
@@ -120,7 +128,8 @@ def expand(vid, start, end, headline, body, native=False, log=print):
     if not cached:
         raise IngestError("missing", "That transcript is no longer cached.")
     sentences = cached["sentences"]
-    end = min(end if end and end > start else start + 240, start + EXPAND_MAX)
+    end = min(max(end if end and end > start else start + 240, start + EXPAND_MIN),
+              start + EXPAND_MAX)
     window = [x for x in sentences if start - 5 <= x["start"] <= end]
     if not window:
         return ""
@@ -138,11 +147,30 @@ def expand(vid, start, end, headline, body, native=False, log=print):
     if "NOTHING FURTHER" in out.upper():
         save_expansion(vid, native, start, "")   # "asked, and there is nothing" is an answer
         return ""
-    text, dropped = gist_prompt.verify(out.strip(), sentences, vid)
+    text, dropped = gist_prompt.verify(_destaff(out.strip()), sentences, vid)
     if dropped:
         log(f"  ({dropped} invented timestamp(s) removed from the expansion)")
     save_expansion(vid, native, start, text)
     return text
+
+
+_SCAFFOLD = re.compile(
+    r"\b(?:the|our|this)\s+speaker\s+"
+    r"(?:notes?|claims?|says?|states?|explains?|outlines?|suggests?|argues?|points? out|"
+    r"observes?|adds?|mentions?|describes?|admits?|confirms?|invites?|asks?)\s+(?:that\s+)?",
+    re.I)
+_SCAFFOLD2 = re.compile(r"\b(?:the answer provided is|it is (?:worth )?noted) that\s+", re.I)
+
+
+def _destaff(text: str) -> str:
+    """Strip reported-speech scaffolding the model slipped past the prompt.
+
+    "The speaker notes that X" → "X". The whole page is already about what was said, so
+    naming that fact in every sentence is three words of nothing (Denis, 2026-08-08)."""
+    out = _SCAFFOLD2.sub("", _SCAFFOLD.sub("", text))
+    # Re-capitalise wherever a sentence now begins mid-clause.
+    out = re.sub(r"(^|(?<=[.!?]\s))([a-z])", lambda m: m.group(1) + m.group(2).upper(), out)
+    return out
 
 
 class Cancelled(Exception):
@@ -154,6 +182,10 @@ class TooLong(Exception):
 
 
 GIST_V = 2          # bump when the PROMPT changes, so old summaries are re-made
+EXP_V = 2           # bump when the EXPAND PROMPT changes; older expansions are dropped
+                    # rather than shown, the same way stale images are — Denis reloaded and
+                    # still saw "the speaker, the speaker, the speaker" because those were
+                    # written before the rule existed (2026-08-08)
 IMG_V = 2           # bump when the IMAGE RESOLVER changes; older images are dropped, not
                     # shown — a saved summary keeps its text but loses pictures resolved
                     # by a design we no longer trust (the Hallowe'en apple-bobbing next to
@@ -229,6 +261,8 @@ def load_summary(vid, native=False):
             return None
         if d.get("img_v") != IMG_V:
             d["images"] = []
+        if d.get("exp_v") != EXP_V:
+            d["expansions"] = {}
         return d
     except (OSError, ValueError):
         return None
@@ -488,7 +522,7 @@ def run(url, model_key="dense", refresh=False, progress=None,
     save_summary(vid, native=native, payload={
                            "gist_v": GIST_V, "text": text, "at": time.time(),
                            "title": meta.get("title", ""), "images": images,
-                           "img_v": IMG_V, "native": bool(native),
+                           "img_v": IMG_V, "exp_v": EXP_V, "native": bool(native),
                            "duration": meta.get("duration", 0)})
     run.last = {"title": meta.get("title", ""), "markdown": text, "dropped": dropped,
                 "video_id": vid, "timings": timings,
