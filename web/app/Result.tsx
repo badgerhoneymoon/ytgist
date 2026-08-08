@@ -300,17 +300,6 @@ function Step({
               </button>
             )}
 
-            {t.evidence && (
-              <button
-                onClick={() => setOpen((v) => !v)}
-                aria-expanded={open}
-                className="text-[12.5px] text-soft transition-colors duration-150 hover:text-ink
-                           focus-visible:outline-2 focus-visible:outline-offset-2
-                           focus-visible:outline-accent"
-              >
-                {open ? "hide the quote" : "what was said"}
-              </button>
-            )}
           </div>
         )}
 
@@ -333,6 +322,16 @@ function Step({
              intentional) but never the quote, whose ragged right edge against a
              half-width block just looks broken. */
           <div className="clear-right">
+            <button
+              onClick={() => setOpen((v) => !v)}
+              aria-expanded={open}
+              className="mt-4 block text-[12.5px] text-soft transition-colors duration-150
+                         hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2
+                         focus-visible:outline-accent"
+            >
+              {open ? "hide the quote" : "what was said"}
+            </button>
+
             {/* The grid-rows 0fr→1fr trick animates to CONTENT HEIGHT without measuring
                 it — no max-height guess that clips long quotes or lags on short ones. */}
             <div
