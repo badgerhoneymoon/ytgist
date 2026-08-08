@@ -473,13 +473,23 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    def _bye(*_):
+        # GRACEFUL. A summary that is mid-generation when the engine is killed is simply
+        # lost — the transcript survives, but the model time does not, and the next click
+        # silently pays for it again. That is almost certainly what happened when a restart
+        # of mine landed on a live run (2026-08-09). Waiting for the lock costs nothing when
+        # nothing is running, and saves a minute of GPU when something is.
+        if not _RUN.acquire(timeout=120):
+            print("  a run did not finish in 120s — exiting anyway")
+        sys.exit(0)
+
     # SIGTERM must unwind, not vanish. The engine now PARKS a 21GB llama-server between
     # jobs, and atexit only runs on a normal interpreter exit — so a plain `pkill` left the
     # parked server orphaned, which is the exact failure the warm pool was supposed to be
     # safe against (measured, 2026-08-08). Turning the signal into sys.exit runs atexit,
     # which stops it.
     for _sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(_sig, lambda *_: sys.exit(0))
+        signal.signal(_sig, _bye)
 
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"ytgist → http://127.0.0.1:{PORT}   (ctrl-c to stop)")
