@@ -259,7 +259,8 @@ class Server:
         cmd = ["llama-server", "-m", model, "-c", str(ctx), "-fa", "on", "-np", "1",
                "--cache-reuse", "256",
                "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
-               "--port", str(port), "--reasoning", "off", "--alias", ALIAS]
+               "--port", str(port), "--reasoning", "off", "--reasoning-budget", "0",
+               "--alias", ALIAS]
         log(f"  starting llama-server on :{port} with a {ctx // 1024}k context "
             f"(own process, stopped when done)")
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
