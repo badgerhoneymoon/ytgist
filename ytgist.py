@@ -196,6 +196,7 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None):
                 out = srv.chat(gist_prompt.SYSTEM, user)
 
     step("done", 100, "")
+    was_cached = bool(timings.pop("_cached", False))   # popped BEFORE any consumer
     text, dropped = gist_prompt.verify(out, sentences, vid)
     print()
     print(gist_prompt.sanitize(meta.get("title", "")))
@@ -205,9 +206,8 @@ def run(url, question=None, model_key="dense", refresh=False, progress=None):
         log(f"\n  ({dropped} invented timestamp(s) removed — the text was kept)")
     run.last = {"title": meta.get("title", ""), "markdown": text, "dropped": dropped,
                 "video_id": vid, "timings": timings,
-                "duration": meta.get("duration", 0), "cached": was_cached}
-    was_cached = timings.pop("_cached", False)
-    run.last_cached = was_cached
+                "duration": meta.get("duration", 0), "cached": was_cached,
+                "sentences": sentences}   # the UI shows the evidence behind each claim
     total = sum(timings.values())
     log("\n  " + " · ".join(f"{k} {v:g}s" for k, v in timings.items())
         + f"  =  {total:.0f}s total")

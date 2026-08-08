@@ -61,12 +61,16 @@ PAGE = """<!doctype html>
   #steps { display:flex; gap:8px; flex-wrap:wrap; font-size:13px; margin-bottom:8px; }
   #steps span { display:flex; align-items:center; gap:6px; color:var(--soft);
        padding:4px 10px; border:1px solid var(--line); border-radius:99px; }
-  #steps span.done { color:var(--soft); opacity:.55; }
+  /* DONE = green, not faded. A finished step that looks dimmed reads as "skipped" or
+     "disabled"; the eye wants a positive signal for work that succeeded (Denis). */
+  #steps span.done { color:#3F7D5A; border-color:#3F7D5A;
+       background:color-mix(in srgb, #3F7D5A 10%, transparent); }
+  @media (prefers-color-scheme: dark) { #steps span.done { color:#63B187; border-color:#3F7D5A; } }
   #steps span.now { color:var(--canvas); background:var(--accent); border-color:var(--accent);
        font-weight:600; }
   #steps span.now::before { content:""; width:6px; height:6px; border-radius:50%;
        background:currentColor; animation:pulse 1s infinite; }
-  #steps span.done::before { content:"✓"; font-size:11px; }
+  #steps span.done::before { content:"✓"; font-size:11px; font-weight:700; }
   @keyframes pulse { 50% { opacity:.25 } }
   #stage { color:var(--soft); font-size:14px; min-height:22px; }
   #out { margin-top:30px; white-space:pre-wrap; }
@@ -78,7 +82,20 @@ PAGE = """<!doctype html>
   #tlegend span { display:flex; align-items:center; gap:6px; }
   #tlegend i { width:9px; height:9px; border-radius:2px; display:inline-block; }
   #tlegend b { color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums; }
-  #out h2 { font-size:22px; margin:0 0 18px; letter-spacing:-.01em; }
+  #out h2 { font-size:22px; margin:0 0 14px; letter-spacing:-.01em; }
+  .tldr { display:block; font-size:17px; line-height:1.5; color:var(--body);
+          padding:14px 16px; border-left:3px solid var(--accent); margin:0 0 26px;
+          background:color-mix(in srgb, var(--accent) 6%, transparent); }
+  b.take { display:block; font-size:17px; font-weight:650; letter-spacing:-.01em;
+           margin:22px 0 4px; color:var(--ink); }
+  details.ev { display:inline; }
+  details.ev summary { display:inline; cursor:pointer; font-size:12px; color:var(--soft);
+           margin-left:8px; list-style:none; border-bottom:1px dotted var(--line); }
+  details.ev summary::-webkit-details-marker { display:none; }
+  details.ev[open] { display:block; margin:8px 0 2px; padding:11px 14px;
+           background:color-mix(in srgb, var(--ink) 4%, transparent);
+           border-left:2px solid var(--line); border-radius:0 8px 8px 0;
+           font-size:14px; line-height:1.55; color:var(--body); white-space:normal; }
   #out a { color:var(--accent); font-variant-numeric:tabular-nums; text-decoration:none;
        border-bottom:1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
   #out a:hover { border-bottom-color:var(--accent); }
@@ -181,15 +198,42 @@ function renderTimings(t, videoSecs, cached) {
 """
 
 
-def _render(markdown: str) -> str:
-    """[label](url) → anchors, everything else escaped.
+def _render(markdown: str, sentences=None) -> str:
+    """Scannable takeaways → HTML. **bold** headlines, timestamps as quiet links.
 
-    Escape FIRST, then linkify: the text contains a stranger's video transcript, and
+    Escape FIRST, then add markup: the text is derived from a stranger's transcript, and
     building HTML from it any other way is how a summary becomes an injection."""
     import re
     safe = html.escape(markdown)
-    return re.sub(r"\[([^\]]+)\]\((https://youtu\.be/[^)]+)\)",
+    safe = re.sub(r"\[([^\]]+)\]\((https://youtu\.be/[^)]+)\)",
                   r'<a href="\2" target="_blank" rel="noopener">\1</a>', safe)
+    # **headline** → its own line, big and bold: skimming these alone must carry the
+    # argument, which is the whole reason this format won the A/B.
+    safe = re.sub(r"\*\*(.+?)\*\*", r'<b class="take">\1</b>', safe)
+    # EVIDENCE, Perplexity-style: every takeaway carries the transcript lines it came
+    # from, one click away. This does NOT prove the claim — the check that a cited
+    # timestamp exists is syntactic, and a wrong claim can quote a real moment. What it
+    # does is make CHECKING free: the reader sees the speaker's own words next to the
+    # summary instead of taking it on faith. That is the honest version of "verified",
+    # and it is what Perplexity actually does — it shows sources, it doesn't prove them.
+    if sentences:
+        def evidence(m):
+            secs = int(m.group(1))
+            near = [s for s in sentences if secs - 8 <= s["start"] <= secs + 20]
+            if not near:
+                return m.group(0)
+            quote = " ".join(s["text"].strip() for s in near)[:420]
+            return (m.group(0) + '<details class="ev"><summary>what was said</summary>'
+                    + html.escape(quote) + "…</details>")
+        safe = re.sub(r'<a href="https://youtu\.be/[^?]+\?t=(\d+)"[^>]*>[^<]*</a>',
+                      evidence, safe)
+    safe = re.sub(r"^TL;DR\s*", '<span class="tldr">', safe, count=1, flags=re.M)
+    if '<span class="tldr">' in safe:
+        i = safe.index('<span class="tldr">')
+        nl = safe.find("\n", i)
+        if nl > 0:
+            safe = safe[:nl] + "</span>" + safe[nl:]
+    return safe
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -257,7 +301,7 @@ class Handler(BaseHTTPRequestHandler):
                 q.put({"error": "No speech was found in that video."})
                 return
             q.put({"title": html.escape(res["title"]),
-                   "markdown": _render(res["markdown"]),
+                   "markdown": _render(res["markdown"], res.get("sentences") or []),
                    "timings": res.get("timings", {}),
                    "duration": res.get("duration", 0),
                    "cached": res.get("cached", False)})
