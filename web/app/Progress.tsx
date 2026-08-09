@@ -75,12 +75,19 @@ export default function Progress({
 
   const [now, setNow] = useState(0);
   const [mark, setMark] = useState({ i: -1, at: 0 });
+  // What each finished phase ACTUALLY took. Once a stage is behind us its estimate is of no
+  // further interest — the real number is better information and it is already known.
+  const [spent, setSpent] = useState<Record<number, number>>({});
   useEffect(() => {
     const t0 = performance.now();
     const id = setInterval(() => {
       const t = (performance.now() - t0) / 1000;
       setNow(t);
-      setMark((m) => (m.i === iRef.current ? m : { i: iRef.current, at: t }));
+      setMark((m) => {
+        if (m.i === iRef.current) return m;
+        if (m.i >= 0) setSpent((sp) => ({ ...sp, [m.i]: t - m.at }));
+        return { i: iRef.current, at: t };
+      });
     }, 200);
     return () => clearInterval(id);
   }, []);
@@ -138,14 +145,24 @@ export default function Progress({
         <div className="mb-1.5 flex gap-1">
           {steps.map((s, n) => (
             <div key={s.key} style={{ flex: weights[n] }} className="min-w-0">
+              {/* A TIMER, not a label (Denis, 2026-08-09: "I thought it would be a
+                  timer"). A finished phase shows what it really cost, the running one
+                  counts, and the ones still ahead show the estimate — so the row turns
+                  from prediction into record as the run goes by. */}
               <span
                 className={[
                   "block text-[11px] tabular-nums transition-colors duration-300",
                   weights[n] / totalEta < 0.1 ? "invisible" : "",
-                  n === i ? "font-semibold text-accent" : "text-soft/50",
+                  n === i ? "font-semibold text-accent" : "",
+                  n < i || done ? "text-good" : "",
+                  n > i && !done ? "text-soft/40" : "",
                 ].join(" ")}
               >
-                {secs[n] < 60 ? `${Math.round(secs[n])}s` : `${Math.round(secs[n] / 60)}m`}
+                {n === i && !done
+                  ? tick(inStage)
+                  : spent[n] !== undefined
+                    ? tick(spent[n])
+                    : tick(secs[n])}
               </span>
             </div>
           ))}
@@ -272,6 +289,14 @@ function Bar({ w, h, delay }: { w: string; h: string; delay: number }) {
 /** Time remaining, phrased the way a person would say it — and never a countdown that
  *  hits zero while you are still waiting. Estimates are wrong sometimes; pretending
  *  otherwise is what makes a progress bar untrustworthy. */
+/** A phase clock: seconds under a minute, then m:ss. Tenths below ten seconds, because at
+ *  that scale a bare "2s" sitting still looks broken where "2.4s" visibly moves. */
+function tick(secs: number): string {
+  if (secs < 10) return `${secs.toFixed(1)}s`;
+  if (secs < 60) return `${Math.round(secs)}s`;
+  return `${Math.floor(secs / 60)}:${String(Math.round(secs % 60)).padStart(2, "0")}`;
+}
+
 /** Elapsed, in units a person reads at a glance. */
 function clock(secs: number): string {
   const m = Math.floor(secs / 60);
