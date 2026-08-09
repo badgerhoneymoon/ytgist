@@ -53,6 +53,32 @@ class Control:
 
 _ctl = {}                 # job id → Control
 
+# WHAT IS RUNNING RIGHT NOW, so a page can rejoin it.
+#
+# The job already survived a reload — it runs in its own thread inside a detached engine, and
+# closing the window or quitting the app never touched it. What did not survive was the
+# VIEW: the browser forgot the job id, and nothing let it ask (Denis, 2026-08-09). Keeping
+# the latest frame here means a reconnecting page can restore the progress bar immediately
+# instead of waiting for the next frame — and keeping the finished result means it can pick
+# up a summary that landed while it was away.
+_RESULT_TTL = 600
+_current = {"job": None, "url": "", "video": "", "native": False,
+            "frame": {}, "result": None, "at": 0.0}
+
+
+def _publish(job, url, video, native):
+    _current.update({"job": job, "url": url, "video": video, "native": bool(native),
+                     "frame": {}, "result": None, "at": time.time()})
+
+
+def _snapshot():
+    """What /api/current answers. Drops a stale finished result so a page opened an hour
+    later is not greeted with someone else's summary."""
+    cur = dict(_current)
+    if cur["result"] is not None and time.time() - cur["at"] > _RESULT_TTL:
+        return {}
+    return cur
+
 PORT = int(os.environ.get("YTGIST_PORT", "8765"))
 _jobs = {}          # id → Queue of event dicts
 
@@ -293,6 +319,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith("/api/current"):
+            body = json.dumps(_snapshot()).encode()
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path.startswith("/api/limits"):
             # The page used to hard-code "under 20 min ~1 min". Those numbers came from my
             # head; the engine has been measuring the real ones all along (Denis, 2026-08-09).
@@ -416,6 +450,7 @@ class Handler(BaseHTTPRequestHandler):
         _jobs[job] = q
         ctl = Control()
         _ctl[job] = ctl
+        _publish(job, req.get("url", ""), "", bool(req.get("native")))
         threading.Thread(target=self._work, args=(q, req, ctl), daemon=True).start()
         body = json.dumps({"job": job}).encode()
         self.send_response(200)
@@ -442,6 +477,12 @@ class Handler(BaseHTTPRequestHandler):
             def progress(f):
                 if f.get("stage"):
                     last.update({k: f[k] for k in ("stage", "pct", "msg") if k in f})
+                if f.get("eta"):
+                    last["eta"] = f["eta"]
+                # The snapshot carries the CUMULATIVE state, not this one frame, so a page
+                # that rejoins mid-run gets the whole picture rather than whatever happened
+                # to arrive next.
+                _current["frame"] = dict(last)
                 q.put(f)
 
             stop = threading.Event()
@@ -464,7 +505,7 @@ class Handler(BaseHTTPRequestHandler):
             if not res:
                 q.put({"error": "No speech was found in that video."})
                 return
-            q.put({"title": res["title"],
+            final = {"title": res["title"],
                    # RAW markdown for the Next UI, which parses the ** markers itself to
                    # build real components. The pre-rendered HTML below is for the plain
                    # fallback page — sending only that made the React app find zero
@@ -475,7 +516,10 @@ class Handler(BaseHTTPRequestHandler):
                    "duration": res.get("duration", 0),
                    "cached": res.get("cached", False),
                    "sentences": res.get("sentences") or [],
-                   "expansions": res.get("expansions") or {}})
+                   "expansions": res.get("expansions") or {}}
+            _current["result"] = final
+            _current["at"] = time.time()
+            q.put(final)
         except ytgist.TooLong as e:
             q.put({"error": str(e)})
         except ytgist.Cancelled:

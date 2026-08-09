@@ -95,6 +95,120 @@ export default function Home() {
       .catch(() => {});
   }, []);
 
+  /** The engine is the source of truth; the stream is only the fast path.
+   *
+   *  A dropped EventSource was being treated as failure — "Lost the connection to the
+   *  engine" — while the job carried on perfectly well and the summary landed in the
+   *  library (Denis, 2026-08-09). SSE gives liveness, not truth. So before declaring
+   *  anything broken, ask the engine what actually happened; and while a run is in flight,
+   *  poll quietly underneath the stream so a lost frame costs nothing. */
+  const settle = useCallback(async (): Promise<"done" | "running" | "gone"> => {
+    try {
+      const c = await (await fetch(`${ENGINE}/api/current`)).json();
+      if (!c?.job) return "gone";
+      if (c.result) {
+        const id = parseYouTube(c.url ?? "") ?? "";
+        setGist(parseGist(c.result as Frame, id));
+        setLibKey((k) => k + 1);
+        setStage(null);
+        setError("");
+        return "done";
+      }
+      const f = (c.frame ?? {}) as Frame;
+      if (f.pct !== undefined) setPct(f.pct);
+      if (f.eta) setEta(f.eta);
+      if (f.msg) setMsg(f.msg);
+      if (f.stage) setStage(f.stage === "cached" ? "summarise" : f.stage);
+      return "running";
+    } catch {
+      return "gone";
+    }
+  }, []);
+
+  /** Attach to a job already in flight, or pick up one that finished while we were away.
+   *
+   *  The WORK always survived a reload — it runs in its own thread inside a detached engine,
+   *  so closing the window or quitting the app never touched it. Only the view was lost: the
+   *  page forgot the job id and had no way to ask (Denis, 2026-08-09). */
+  const attach = useCallback((job: string, target: string) => {
+    jobRef.current = job;
+    const es = new EventSource(`${ENGINE}/api/events?job=${job}`);
+    esRef.current = es;
+    let watchdog: ReturnType<typeof setTimeout>;
+    // The quiet backstop: even with the stream silent, this keeps the bar moving and
+    // catches the result if a frame is missed.
+    const poll = setInterval(async () => {
+      if ((await settle()) !== "running") clearInterval(poll);
+    }, 5_000);
+    const done = () => {
+      clearTimeout(watchdog);
+      clearInterval(poll);
+      es.close();
+      esRef.current = null;
+      setStage(null);
+    };
+    const arm = () => {
+      clearTimeout(watchdog);
+      watchdog = setTimeout(async () => {
+        if ((await settle()) === "running") return arm();   // alive, just quiet
+        setError("The engine stopped responding. It may have been restarted — try again.");
+        done();
+      }, 150_000);
+    };
+    arm();
+    es.onmessage = (ev) => {
+      arm();
+      const f: Frame = JSON.parse(ev.data);
+      if (f.pct !== undefined) setPct(f.pct);
+      if (f.stage) setStage(f.stage === "cached" ? "summarise" : f.stage);
+      if (f.msg) setMsg(f.msg);
+      if (f.eta) setEta(f.eta);
+      if (f.error) {
+        setError(f.error);
+        done();
+      }
+      if (f.stopped) done();
+      if (f.markdown !== undefined) {
+        const id = parseYouTube(target) ?? target.match(YT_ID)?.[1] ?? "";
+        setGist(parseGist(f, id));
+        setLibKey((k) => k + 1);
+        done();
+      }
+    };
+    es.onerror = async () => {
+      if (es.readyState !== EventSource.CLOSED) return;   // it reconnects on its own
+      const what = await settle();
+      if (what === "running") return;                     // the poll keeps it alive
+      if (what === "done") { done(); return; }
+      setError("Lost the connection to the engine — try again.");
+      done();
+    };
+  }, [settle]);
+
+  // On load, ask what the engine is doing. A run in flight restores the progress bar from
+  // its cumulative state; one that finished while the page was closed opens as a result.
+  useEffect(() => {
+    fetch(`${ENGINE}/api/current`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((c) => {
+        if (!c?.job) return;
+        setUrl(c.url ?? "");
+        setNative(!!c.native);
+        if (c.result) {
+          const id = parseYouTube(c.url ?? "") ?? "";
+          setGist(parseGist(c.result as Frame, id));
+          return;
+        }
+        const f = (c.frame ?? {}) as Frame;
+        if (f.pct !== undefined) setPct(f.pct);
+        if (f.eta) setEta(f.eta);
+        setMsg(f.msg ?? "reconnecting");
+        setStage(f.stage === "cached" ? "summarise" : (f.stage ?? "check"));
+        attach(c.job, c.url ?? "");
+      })
+      .catch(() => {});
+  }, [attach]);
+
   const start = useCallback(
     async (
       mode: "" | "regen" | "refresh" = "",
