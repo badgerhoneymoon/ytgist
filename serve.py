@@ -382,19 +382,28 @@ class Handler(BaseHTTPRequestHandler):
         if not re.fullmatch(r"[A-Za-z0-9_-]{11}", vid or ""):
             return self.send_error(400)
 
-        hit = Handler._probe_cache.get(vid)
-        if hit is None:
+        # ONLY the yt-dlp metadata is memoised. What we already HAVE on disk changes as
+        # soon as a run finishes, so caching that made the card go on offering to summarise
+        # a video it had just summarised (Denis, 2026-08-09).
+        meta = Handler._probe_cache.get(vid)
+        if meta is None:
             try:
                 info = ytgist.yt.probe(f"https://www.youtube.com/watch?v={vid}")
+                meta = {"title": info["title"], "duration": info["duration"]}
             except Exception as exc:
-                hit = {"error": str(exc)}
-            else:
-                mins = info["duration"] / 60
-                cached = bool(ytgist.load_cached(vid))
-                hit = {"title": info["title"], "duration": info["duration"],
-                       "cached": cached,
-                       "eta": round(sum(ytgist.estimate(mins, cached).values()))}
-            Handler._probe_cache[vid] = hit
+                meta = {"error": str(exc)}
+            Handler._probe_cache[vid] = meta
+
+        hit = dict(meta)
+        if "error" not in hit:
+            mins = hit["duration"] / 60
+            cached = bool(ytgist.load_cached(vid))
+            hit.update({
+                "cached": cached,
+                "has_en": bool(ytgist.load_summary(vid, False)),
+                "has_native": bool(ytgist.load_summary(vid, True)),
+                "eta": round(sum(ytgist.estimate(mins, cached).values())),
+            })
 
         body = json.dumps(hit).encode()
         self.send_response(200)

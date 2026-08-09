@@ -438,7 +438,7 @@ export default function Home() {
           that doesn&rsquo;t look like a YouTube link
         </p>
       )}
-      <Preview videoId={videoId ?? ""} />
+      <Preview videoId={videoId ?? ""} native={native} />
 
       {busy && <Progress stage={stage} pct={pct} msg={msg} eta={eta} phaseAgo={phaseAgo} onCancel={cancel} />}
 

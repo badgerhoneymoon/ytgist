@@ -5,7 +5,14 @@ import { useEffect, useState } from "react";
 type Meta = { id: string; title: string; author: string; thumb: string };
 /** Duration and this video's own estimate, from the engine. oEmbed does not carry length,
  *  and length is the one property that changes the wait by an order of magnitude. */
-type Cost = { id: string; duration: number; eta: number; cached: boolean };
+type Cost = {
+  id: string;
+  duration: number;
+  eta: number;
+  cached: boolean;
+  hasEn: boolean;
+  hasNative: boolean;
+};
 
 const ENGINE = "http://127.0.0.1:8765";
 
@@ -22,7 +29,13 @@ function hms(secs: number): string {
  *  "why isn't the button working" — and it gives the eye something while the 40-second
  *  summary runs. YouTube's oEmbed needs no key and no quota, so this costs one small
  *  request and nothing else. */
-export default function Preview({ videoId }: { videoId: string }) {
+export default function Preview({
+  videoId,
+  native = false,
+}: {
+  videoId: string;
+  native?: boolean;
+}) {
   const [meta, setMeta] = useState<Meta | null>(null);
   const [cost, setCost] = useState<Cost | null>(null);
 
@@ -36,7 +49,10 @@ export default function Preview({ videoId }: { videoId: string }) {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (alive && d?.duration) {
-          setCost({ id: videoId, duration: d.duration, eta: d.eta, cached: !!d.cached });
+          setCost({
+            id: videoId, duration: d.duration, eta: d.eta, cached: !!d.cached,
+            hasEn: !!d.has_en, hasNative: !!d.has_native,
+          });
         }
       })
       .catch(() => {});
@@ -88,8 +104,15 @@ export default function Preview({ videoId }: { videoId: string }) {
           <p className="mt-1 text-[13px] text-soft">
             <span className="font-medium text-ink">{hms(c.duration)}</span>
             {" · "}
-            {c.cached ? "already transcribed, " : ""}
-            about {c.eta < 90 ? `${c.eta}s` : `${Math.round(c.eta / 60)} min`} to summarise
+            {(native ? c.hasNative : c.hasEn) ? (
+              <span className="text-good">already summarised — opens instantly</span>
+            ) : (
+              <>
+                {c.cached ? "already transcribed, " : ""}
+                about {c.eta < 90 ? `${c.eta}s` : `${Math.round(c.eta / 60)} min`} to
+                summarise
+              </>
+            )}
           </p>
         )}
       </div>
