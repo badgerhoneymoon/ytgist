@@ -12,6 +12,9 @@ type Cost = {
   cached: boolean;
   hasEn: boolean;
   hasNative: boolean;
+  /** yt-dlp's title. A fallback for oEmbed, which answers 502 often enough to matter — the
+   *  card sat on "loading…" for a video whose title the engine already had. */
+  title: string;
 };
 
 const ENGINE = "http://127.0.0.1:8765";
@@ -52,6 +55,7 @@ export default function Preview({
           setCost({
             id: videoId, duration: d.duration, eta: d.eta, cached: !!d.cached,
             hasEn: !!d.has_en, hasNative: !!d.has_native,
+            title: d.title ?? "",
           });
         }
       })
@@ -95,7 +99,7 @@ export default function Preview({
       />
       <div className="min-w-0">
         <p className="truncate text-[14.5px] font-medium leading-snug">
-          {m?.title ?? "loading…"}
+          {m?.title || c?.title || "loading…"}
         </p>
         {m?.author && (
           <p className="mt-0.5 truncate text-[13px] text-soft">{m.author}</p>

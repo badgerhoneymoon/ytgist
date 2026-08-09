@@ -241,63 +241,9 @@ export default function Home() {
         }),
       });
       const { job } = await res.json();
-      jobRef.current = job;
-
-      const es = new EventSource(`${ENGINE}/api/events?job=${job}`);
-      esRef.current = es;
-      let watchdog: ReturnType<typeof setTimeout>;
-      const done = () => {
-        clearTimeout(watchdog);
-        es.close();
-        esRef.current = null;
-        setStage(null);
-      };
-      // WATCHDOG. If the engine dies mid-job — I restarted it under a running job and
-      // the page sat on "reading video info" forever — the stream simply goes quiet.
-      // EventSource does not consider silence an error, so nothing ever fires and the
-      // UI waits indefinitely.
-      //
-      // This USED to fire on healthy runs: summarising sends no frames, and a 57-minute
-      // video spends 183s in it, so the page declared a working engine dead and threw
-      // away a finished summary (Denis, 2026-08-08). The real fix is the engine's 10s
-      // heartbeat; this window is now only a backstop for genuine death.
-      const arm = () => {
-        clearTimeout(watchdog);
-        watchdog = setTimeout(() => {
-          setError("The engine stopped responding. It may have been restarted — try again.");
-          done();
-        }, 150_000);
-      };
-      arm();
-      es.onmessage = (ev) => {
-        arm();
-        const f: Frame = JSON.parse(ev.data);
-        if (f.pct !== undefined) setPct(f.pct);
-        if (f.stage) setStage(f.stage === "cached" ? "summarise" : f.stage);
-        if (f.msg) setMsg(f.msg);
-        if (f.eta) setEta(f.eta);
-        if (f.error) {
-          setError(f.error);
-          done();
-        }
-        if (f.stopped) done();
-        if (f.markdown !== undefined) {
-          const id = parseYouTube(target) ?? target.match(YT_ID)?.[1] ?? "";
-          setGist(parseGist(f, id));
-          setLibKey((k) => k + 1);
-          done();
-        }
-      };
-      es.onerror = () => {
-        // EventSource auto-reconnects; a job id that no longer exists 404s forever, so
-        // treat a hard error as terminal rather than letting it retry in a loop.
-        if (es.readyState === EventSource.CLOSED) {
-          setError("Lost the connection to the engine — try again.");
-          done();
-        }
-      };
+      attach(job, target);
     },
-    [url, busy, native]
+    [url, busy, native, attach]
   );
 
   return (
