@@ -31,6 +31,14 @@ EXPANDS = os.path.expanduser("~/.ytgist/expands.jsonl")
 KEEP = 200                  # newest N kept; older entries describe a machine long gone
 MIN_SAMPLES = 3             # below this, a median is just an anecdote
 
+# HOW FAR BACK THE FIT LOOKS. The machine is one variable; the CODE is another, and the code
+# changes daily. Sending Qwen's own sampling parameters instead of llama.cpp's defaults made
+# summarising ~13% faster in one commit — 4.11 s/min before, 3.59 after — and a fit averaging
+# across both eras over-predicted the next run by 28% (2026-08-09). Old runs describe a
+# program that no longer exists, so they are weighted down rather than trusted equally.
+WINDOW = 12                 # runs before the newest that still carry meaningful weight
+HALF_LIFE = 6               # a run this many runs old counts half as much
+
 # Phases whose cost scales with the length of the video.
 SCALING = ("download", "transcribe", "summarise")
 
@@ -130,6 +138,13 @@ def _trim():
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
+def _weights(n):
+    """Newest run weighs 1.0, halving every HALF_LIFE runs. Exponential rather than a hard
+    cutoff so the estimate drifts as the code changes instead of jumping when one run falls
+    off the end of a window."""
+    return [0.5 ** ((n - 1 - i) / HALF_LIFE) for i in range(n)]
+
+
 def _fit(rows, phase):
     """(fixed_seconds, seconds_per_minute) for a phase, or None.
 
@@ -141,18 +156,25 @@ def _fit(rows, phase):
 
     Least squares, then clamped: a negative intercept or slope is a fitting artefact of a
     thin sample, not a discovery that longer videos are cheaper."""
-    pts = [(r["minutes"], r["timings"][phase])
-           for r in rows
-           if r.get("minutes", 0) > 0.5 and phase in (r.get("timings") or {})]
-    if len(pts) < MIN_SAMPLES:
+    keep = [r for r in rows
+            if r.get("minutes", 0) > 0.5 and phase in (r.get("timings") or {})]
+    if len(keep) < MIN_SAMPLES:
         return None
+    keep = keep[-(WINDOW + HALF_LIFE * 2):]
+    w = _weights(len(keep))
+    pts = [(r["minutes"], r["timings"][phase], w[i]) for i, r in enumerate(keep)]
+
     # One point per length BAND, so eleven 11-minute clips do not outvote the single
-    # 7-minute one, and two feature-length videos do not set the whole line.
+    # 7-minute one, and two feature-length videos do not set the whole line. Within a band
+    # the newest runs dominate, which is where recency does its work.
     bands = {}
-    for x, y in pts:
-        bands.setdefault(int(x // 10), []).append((x, y))
-    pts = [(statistics.median([x for x, _ in v]), statistics.median([y for _, y in v]))
-           for v in bands.values()]
+    for x, y, wt in pts:
+        bands.setdefault(int(x // 10), []).append((x, y, wt))
+    pts = []
+    for v in bands.values():
+        tw = sum(t for _, _, t in v)
+        pts.append((sum(x * t for x, _, t in v) / tw,
+                    sum(y * t for _, y, t in v) / tw))
     if len(pts) < 2:
         x, y = pts[0]
         return (0.0, y / x)
@@ -180,20 +202,22 @@ def fit_summarise(rows=None):
     because a summary with no steps and no transcript costs nothing."""
     import gist_prompt
     rows = _rows() if rows is None else rows
-    pts = []
-    for r in rows:
-        m, y = r.get("minutes", 0), (r.get("timings") or {}).get("summarise")
-        if not y or m <= 0:
-            continue
-        lo, _, hi = gist_prompt.steps_for(m).partition("-")
-        pts.append(((int(lo) + int(hi)) / 2, m, y))
-    if len(pts) < MIN_SAMPLES + 1:
+    keep = [r for r in rows
+            if (r.get("timings") or {}).get("summarise") and r.get("minutes", 0) > 0]
+    if len(keep) < MIN_SAMPLES + 1:
         return None
-    saa = sum(a * a for a, _, _ in pts)
-    sbb = sum(b * b for _, b, _ in pts)
-    sab = sum(a * b for a, b, _ in pts)
-    say = sum(a * y for a, _, y in pts)
-    sby = sum(b * y for _, b, y in pts)
+    keep = keep[-(WINDOW + HALF_LIFE * 2):]
+    w = _weights(len(keep))
+    pts = []
+    for i, r in enumerate(keep):
+        lo, _, hi = gist_prompt.steps_for(r["minutes"]).partition("-")
+        pts.append(((int(lo) + int(hi)) / 2, r["minutes"], r["timings"]["summarise"], w[i]))
+
+    saa = sum(t * a * a for a, _, _, t in pts)
+    sbb = sum(t * b * b for _, b, _, t in pts)
+    sab = sum(t * a * b for a, b, _, t in pts)
+    say = sum(t * a * y for a, _, y, t in pts)
+    sby = sum(t * b * y for _, b, y, t in pts)
     det = saa * sbb - sab * sab
     if abs(det) < 1e-9:
         return None
