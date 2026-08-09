@@ -44,17 +44,30 @@ SCALING = ("download", "transcribe", "summarise")
 
 
 def power_mode() -> str:
-    """"low" or "normal". Low power mode throttles the GPU hard enough that a transcript
-    which takes 35s on mains can take twice that, which is exactly the kind of surprise an
-    ETA exists to prevent."""
+    """"low", "high" or "normal".
+
+    THE KEY IS `powermode`, NOT `lowpowermode`. This looked for a setting macOS does not
+    report and so answered "normal" for every run ever logged — including one in Low Power
+    Mode that took 121% longer than predicted, with summarising 2.4x slower (Denis,
+    2026-08-09). A split that never fires is worse than no split: it looks like it is
+    working.
+
+    On Apple Silicon `pmset -g` reports powermode 0 automatic, 1 low, 2 high. The older
+    `lowpowermode` spelling is still accepted as a fallback."""
     try:
         out = subprocess.run(["pmset", "-g"], capture_output=True, text=True,
                              timeout=3).stdout
-        for line in out.splitlines():
-            if "lowpowermode" in line:
-                return "low" if line.strip().split()[-1] not in ("0", "false") else "normal"
     except Exception:
-        pass
+        return "normal"
+
+    for line in out.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        if parts[0] == "powermode":
+            return {"1": "low", "2": "high"}.get(parts[-1], "normal")
+        if parts[0] == "lowpowermode":
+            return "low" if parts[-1] not in ("0", "false") else "normal"
     return "normal"
 
 
