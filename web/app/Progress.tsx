@@ -145,10 +145,13 @@ export default function Progress({
         <div className="mb-1.5 flex gap-1">
           {steps.map((s, n) => (
             <div key={s.key} style={{ flex: weights[n] }} className="min-w-0">
-              {/* A TIMER, not a label (Denis, 2026-08-09: "I thought it would be a
-                  timer"). A finished phase shows what it really cost, the running one
-                  counts, and the ones still ahead show the estimate — so the row turns
-                  from prediction into record as the run goes by. */}
+              {/* A COUNTDOWN. A timer runs DOWN to zero — I built it counting up the
+                  first time, which is a stopwatch, not a timer (Denis, 2026-08-09).
+                  The running phase counts its estimate down; a phase already finished shows
+                  what it really cost; the ones ahead show the estimate they will count from.
+                  Overrunning shows as "+12s" rather than freezing at zero, because a clock
+                  stuck on 0.0 while work continues is the same lie as a progress bar
+                  parked at 98%. */}
               <span
                 className={[
                   "block text-[11px] tabular-nums transition-colors duration-300",
@@ -159,7 +162,9 @@ export default function Progress({
                 ].join(" ")}
               >
                 {n === i && !done
-                  ? tick(inStage)
+                  ? secs[n] - inStage >= 0
+                    ? tick(secs[n] - inStage)
+                    : `+${tick(inStage - secs[n])}`
                   : spent[n] !== undefined
                     ? tick(spent[n])
                     : tick(secs[n])}
