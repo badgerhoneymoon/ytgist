@@ -2,16 +2,26 @@
 
 import type { GpuSample } from "./types";
 
-/** Thresholds are Apple Silicon's own behaviour, not round numbers: sustained work sits in
- *  the sixties, the fan becomes audible around the seventies, and the nineties is where the
- *  SoC pulls its clocks back — which the ETA would otherwise report as an unexplained
- *  slowdown. */
+/** FOUR STATES, FOUR HUES — and they have to be told apart at a glance.
+ *
+ *  The first attempt used grey for working and then accent-orange and red for the top two
+ *  bands, which read as one colour twice: "why are the two last ones all red?" (Denis,
+ *  2026-08-09). Grey was worse than wrong — it is the page's colour for "inert", so a
+ *  working machine looked switched off.
+ *
+ *  Green → amber → orange → red is the ordering everyone already knows, and the thresholds
+ *  are Apple Silicon's own behaviour rather than round numbers: sustained work sits in the
+ *  sixties, the fan becomes audible around eighty, and past ninety the SoC pulls its clocks
+ *  back — which the ETA would otherwise report as an unexplained slowdown.
+ */
+export const FAN_AUDIBLE = 80;
+
 export function hueFor(c: number | null | undefined): string {
   if (c === undefined || c === null) return "var(--color-soft)";
-  if (c >= 90) return "#C0392B";
-  if (c >= 75) return "var(--color-accent)";
-  if (c >= 60) return "var(--color-soft)";
-  return "var(--color-good)";
+  if (c >= 90) return "#B3261E";                 // throttling
+  if (c >= FAN_AUDIBLE) return "var(--color-accent)";  // fan audible
+  if (c >= 60) return "#C8971B";                 // working
+  return "var(--color-good)";                    // cool
 }
 
 /** The machine, while it works.
@@ -58,7 +68,9 @@ export default function Machine({
           {c ?? "—"}°
         </span>
         {last?.u !== null && last?.u !== undefined && (
-          <span className="text-[11.5px] text-soft/60">GPU {last.u}%</span>
+          // "GPU 98%" left it ambiguous — percent of what? It is how BUSY the GPU is
+          // (Denis asked, 2026-08-09), so the word does the work the symbol could not.
+          <span className="text-[11.5px] text-soft/60">{last.u}% busy</span>
         )}
         {!!last?.w && <span className="text-[11.5px] text-soft/60">{last.w} W</span>}
       </span>
@@ -71,13 +83,13 @@ export default function Machine({
           className="overflow-visible"
           aria-label={`GPU temperature, now ${c} degrees`}
         >
-          {/* 75°C, where the fan becomes audible — the only gridline worth drawing, because
-              it is the one you can hear. */}
+          {/* The one gridline worth drawing: where the fan becomes audible. It is the only
+              threshold you can hear. */}
           <line
             x1="0"
             x2={width}
-            y1={y(75)}
-            y2={y(75)}
+            y1={y(FAN_AUDIBLE)}
+            y2={y(FAN_AUDIBLE)}
             stroke="var(--color-line)"
             strokeWidth="1"
             strokeDasharray="2 3"

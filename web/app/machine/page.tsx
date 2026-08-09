@@ -104,8 +104,8 @@ function curve(from: number, to: number, wobble = 1.5): GpuSample[] {
 }
 
 const BANDS = [
-  { label: "idle → warm (45°C)", series: curve(38, 45) },
-  { label: "working (68°C)", series: curve(45, 68) },
-  { label: "fan audible (82°C)", series: curve(60, 82) },
-  { label: "throttling (95°C)", series: curve(74, 95) },
+  { label: "cool · under 60°C", series: curve(38, 45) },
+  { label: "working · 60-80°C", series: curve(45, 68) },
+  { label: "fan audible · 80-90°C", series: curve(60, 84) },
+  { label: "throttling · 90°C+", series: curve(74, 95) },
 ];
