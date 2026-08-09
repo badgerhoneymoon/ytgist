@@ -62,6 +62,23 @@ _ctl = {}                 # job id → Control
 # the latest frame here means a reconnecting page can restore the progress bar immediately
 # instead of waiting for the next frame — and keeping the finished result means it can pick
 # up a summary that landed while it was away.
+# A SAMPLER FOR WATCHING, separate from the one a job owns. It starts when something asks
+# and stops itself when nothing has asked for a while, so a design page can show live
+# machine stats without a summary running and without leaving macmon behind.
+_watch = gpu.Sampler()
+_watch_seen = [0.0]
+
+
+def _watch_reaper():
+    while True:
+        time.sleep(5)
+        if _watch_seen[0] and time.time() - _watch_seen[0] > 20:
+            _watch_seen[0] = 0.0
+            _watch.stop()
+
+
+threading.Thread(target=_watch_reaper, daemon=True).start()
+
 _RESULT_TTL = 600
 _current = {"job": None, "url": "", "video": "", "native": False,
             "frame": {}, "result": None, "at": 0.0, "phase_at": 0.0}
@@ -327,6 +344,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith("/api/machine"):
+            if not _watch_seen[0]:
+                _watch.start()
+            _watch_seen[0] = time.time()
+            body = json.dumps({"series": _watch.drain()}).encode()
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path.startswith("/api/probe"):
             self._probe()
         elif self.path.startswith("/api/current"):
@@ -544,15 +572,25 @@ class Handler(BaseHTTPRequestHandler):
                 q.put(f)
 
             stop = threading.Event()
+            # One long-lived macmon for the whole job, sampling once a second, drained on
+            # each beat. Polling at chart resolution would otherwise mean a new ~2s process
+            # permanently in flight.
+            sampler = gpu.Sampler()
+            sampler.start()
 
             def beat():
                 t0 = time.time()
-                while not stop.wait(10):
+                while not stop.wait(4):
                     beat_frame = {**last, "elapsed": round(time.time() - t0)}
-                    g = gpu.stats()
-                    if g:
-                        beat_frame["gpu"] = g
-                        _current["gpu"] = g
+                    series = sampler.drain()
+                    if series:
+                        beat_frame["gpu_series"] = series
+                        _current["gpu"] = {k: v for k, v in series[-1].items() if v is not None}
+                    elif not _current.get("gpu"):
+                        g = gpu.stats()          # no macmon: the ioreg numbers still answer
+                        if g:
+                            beat_frame["gpu"] = g
+                            _current["gpu"] = g
                     q.put(beat_frame)
 
             threading.Thread(target=beat, daemon=True).start()
@@ -563,6 +601,7 @@ class Handler(BaseHTTPRequestHandler):
                            regen=bool(req.get("regen")), control=ctl)
             finally:
                 stop.set()
+                sampler.stop()
                 _RUN.release()
             res = getattr(ytgist.run, "last", None)
             if not res:

@@ -14,6 +14,7 @@ export type Frame = {
   stopped?: boolean;
   expansions?: Record<string, string>;   // step start second → saved detail
   gpu?: GpuStats;
+  gpu_series?: GpuSample[];
   eta?: Record<string, number>;   // seconds per remaining phase, sent once length is known
   video_minutes?: number;
   // final frame only
@@ -60,4 +61,13 @@ export type GpuStats = {
   cpu_c?: number;
   watts?: number;
   fan_rpm?: number;
+};
+
+/** One second of machine state. `c` is GPU °C, `u` utilisation %, `w` watts. */
+export type GpuSample = {
+  t: number;
+  c: number | null;
+  cpu: number | null;
+  u: number | null;
+  w: number | null;
 };

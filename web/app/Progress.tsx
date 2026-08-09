@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
-import type { GpuStats, Stage } from "./types";
+import Machine from "./Machine";
+import type { GpuSample, Stage } from "./types";
 
 /** ONE segmented track, not a bar plus a row of pills.
  *
@@ -37,7 +38,7 @@ export default function Progress({
   stage,
   msg,
   eta,
-  gpu,
+  gpuSeries,
   phaseAgo = 0,
   onCancel,
 }: {
@@ -45,8 +46,8 @@ export default function Progress({
   pct: number;
   msg: string;
   eta: Record<string, number> | null;
-  /** What the GPU is doing, sampled with the engine's heartbeat. It explains the fan. */
-  gpu?: GpuStats | null;
+  /** A second-by-second stream of machine state while the job runs. It explains the fan. */
+  gpuSeries?: GpuSample[];
   /** Seconds this phase had ALREADY been running when the page loaded. Non-zero only when
    *  rejoining a run in flight — otherwise the countdown would restart from the full
    *  estimate on every reload while the work carried on underneath. */
@@ -242,7 +243,7 @@ export default function Progress({
           {msg && <span className="text-soft"> · {msg}</span>}
         </p>
         <span className="flex shrink-0 items-center gap-2.5 text-[12.5px] tabular-nums text-soft/70">
-          {gpu && <Machine gpu={gpu} />}
+          {!!gpuSeries?.length && <Machine series={gpuSeries} width={110} height={20} />}
           {done
             ? "done"
             : over
@@ -309,9 +310,6 @@ function Bar({ w, h, delay }: { w: string; h: string; delay: number }) {
   );
 }
 
-/** Time remaining, phrased the way a person would say it — and never a countdown that
- *  hits zero while you are still waiting. Estimates are wrong sometimes; pretending
- *  otherwise is what makes a progress bar untrustworthy. */
 /** A phase clock: seconds under a minute, then m:ss. Tenths below ten seconds, because at
  *  that scale a bare "2s" sitting still looks broken where "2.4s" visibly moves. */
 function tick(secs: number): string {
@@ -326,36 +324,11 @@ function clock(secs: number): string {
   return m ? `${m}m ${Math.round(secs % 60)}s` : `${Math.round(secs)}s`;
 }
 
+/** Time remaining, phrased the way a person would say it — and never a countdown that
+ *  hits zero while you are still waiting. */
 function left(secs: number): string {
   if (secs <= 5) return "almost done";
   const m = Math.floor(secs / 60);
   const s = Math.round(secs % 60);
   return m ? `~${m}m ${s}s left` : `~${s}s left`;
-}
-
-/** THE FAN, EXPLAINED. Thresholds are Apple Silicon's own behaviour rather than round
- *  numbers: sustained work sits in the sixties, the fan becomes audible around the
- *  seventies, and the nineties is where the SoC starts pulling its clocks back — which the
- *  ETA would otherwise report as an unexplained slowdown. */
-function Machine({ gpu }: { gpu: GpuStats }) {
-  const c = gpu.gpu_c;
-  const hue =
-    c === undefined ? "text-soft/50"
-    : c >= 90 ? "text-red-600"
-    : c >= 75 ? "text-accent"
-    : c >= 60 ? "text-soft"
-    : "text-good";
-
-  // ON SCREEN, not on hover (Denis, 2026-08-09). A tooltip is for something you might
-  // want; this is the answer to "why is my fan running", which you want the moment you
-  // wonder. Only the temperature is coloured — the rest is context, and colouring
-  // everything would make the one number that changes meaning stop standing out.
-  return (
-    <span className="flex items-center gap-2 text-[12px]">
-      {c !== undefined && <span className={`font-semibold ${hue}`}>{c}°C</span>}
-      {gpu.util !== undefined && <span className="text-soft/50">GPU {gpu.util}%</span>}
-      {!!gpu.watts && <span className="text-soft/50">{gpu.watts} W</span>}
-      {!!gpu.fan_rpm && <span className="text-soft/50">{gpu.fan_rpm} rpm</span>}
-    </span>
-  );
 }

@@ -17,9 +17,12 @@ is visible in it, which is the actual reason the fan is running.
 
 So: degrees when macmon is installed, load either way.
 """
+import collections
 import json
 import re
 import subprocess
+import threading
+import time
 
 _NUM = r'"{}"\s*=\s*(\d+)'
 
@@ -98,3 +101,73 @@ if __name__ == "__main__":
         if "fan_rpm" in s:
             bits.append(f"fan {s['fan_rpm']} rpm")
         print("  " + " · ".join(bits))
+
+
+# ------------------------------------------------------------------ continuous sampling
+#
+# A CHART NEEDS A STREAM, NOT POLLS. One `macmon pipe -s 1` costs ~1.9s because macmon
+# measures across an interval, so asking once a second would mean a new process permanently
+# in flight. Instead one long-lived `macmon pipe -s 0 -i 1000` is left running for the
+# duration of a job and its lines are read as they arrive: one sample a second, one process,
+# effectively free (Denis, 2026-08-09).
+class Sampler:
+    """A second-by-second stream of machine stats while a job runs.
+
+    Never raises and never blocks the caller. If macmon is missing, drain() simply returns
+    nothing and the UI falls back to the ioreg numbers on the heartbeat."""
+
+    def __init__(self, keep: int = 900):
+        self._proc = None
+        self._buf = collections.deque(maxlen=keep)
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+
+    def start(self):
+        if self._proc is not None:
+            return
+        try:
+            self._proc = subprocess.Popen(
+                ["macmon", "pipe", "-s", "0", "-i", "1000"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        except (FileNotFoundError, OSError):
+            self._proc = None
+            return
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        proc = self._proc
+        for line in proc.stdout:
+            if self._stop.is_set():
+                break
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            t = (d.get("temp") or {})
+            gu = d.get("gpu_usage")
+            with self._lock:
+                self._buf.append({
+                    "t": round(time.time(), 1),
+                    "c": round(t["gpu_temp_avg"]) if t.get("gpu_temp_avg") else None,
+                    "cpu": round(t["cpu_temp_avg"]) if t.get("cpu_temp_avg") else None,
+                    "u": round(gu[1] * 100) if isinstance(gu, list) and len(gu) == 2 else None,
+                    "w": round(d["all_power"], 1) if d.get("all_power") else None,
+                })
+
+    def drain(self):
+        """Everything sampled since the last call. The caller owns it from here."""
+        with self._lock:
+            out = list(self._buf)
+            self._buf.clear()
+        return out
+
+    def stop(self):
+        self._stop.set()
+        p, self._proc = self._proc, None
+        if p is not None:
+            try:
+                p.terminate()
+                p.wait(timeout=3)
+            except Exception:
+                pass
+        self._stop.clear()
