@@ -63,12 +63,13 @@ _ctl = {}                 # job id → Control
 # up a summary that landed while it was away.
 _RESULT_TTL = 600
 _current = {"job": None, "url": "", "video": "", "native": False,
-            "frame": {}, "result": None, "at": 0.0}
+            "frame": {}, "result": None, "at": 0.0, "phase_at": 0.0}
 
 
 def _publish(job, url, video, native):
     _current.update({"job": job, "url": url, "video": video, "native": bool(native),
-                     "frame": {}, "result": None, "at": time.time()})
+                     "frame": {}, "result": None,
+                     "at": time.time(), "phase_at": time.time()})
 
 
 def _snapshot():
@@ -77,6 +78,12 @@ def _snapshot():
     cur = dict(_current)
     if cur["result"] is not None and time.time() - cur["at"] > _RESULT_TTL:
         return {}
+    # HOW LONG THIS PHASE HAS ALREADY BEEN RUNNING. Without it a reloaded page restarts its
+    # countdown from the full estimate while the work is sixty seconds in — the job survived
+    # but the clock did not (Denis, 2026-08-09).
+    if cur["job"] and not cur["result"]:
+        cur["phase_elapsed"] = round(time.time() - (cur["phase_at"] or time.time()), 1)
+        cur["elapsed"] = round(time.time() - (cur["at"] or time.time()), 1)
     return cur
 
 PORT = int(os.environ.get("YTGIST_PORT", "8765"))
@@ -475,6 +482,8 @@ class Handler(BaseHTTPRequestHandler):
             last = {"stage": "check", "pct": 0, "msg": ""}
 
             def progress(f):
+                if f.get("stage") and f["stage"] != last.get("stage"):
+                    _current["phase_at"] = time.time()
                 if f.get("stage"):
                     last.update({k: f[k] for k in ("stage", "pct", "msg") if k in f})
                 if f.get("eta"):

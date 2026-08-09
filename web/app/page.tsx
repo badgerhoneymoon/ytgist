@@ -83,6 +83,7 @@ export default function Home() {
   // itself is the point.
   const [native, setNative] = useState(false);
   const [eta, setEta] = useState<Record<string, number> | null>(null);
+  const [phaseAgo, setPhaseAgo] = useState(0);
   // MEASURED, not asserted. These numbers used to be hard-coded from my own guesses; the
   // engine has been recording the real ones all along, so it serves them (Denis, 2026-08-09).
   const [limits, setLimits] = useState<
@@ -203,6 +204,7 @@ export default function Home() {
         if (f.pct !== undefined) setPct(f.pct);
         if (f.eta) setEta(f.eta);
         setMsg(f.msg ?? "reconnecting");
+        setPhaseAgo(c.phase_elapsed ?? 0);
         setStage(f.stage === "cached" ? "summarise" : (f.stage ?? "check"));
         attach(c.job, c.url ?? "");
       })
@@ -222,6 +224,7 @@ export default function Home() {
       setPct(0);
       setStage("check");
       setEta(null);
+      setPhaseAgo(0);
       setMsg("starting");
 
       const res = await fetch(`${ENGINE}/api/gist`, {
@@ -437,7 +440,7 @@ export default function Home() {
       )}
       <Preview videoId={videoId ?? ""} />
 
-      {busy && <Progress stage={stage} pct={pct} msg={msg} eta={eta} onCancel={cancel} />}
+      {busy && <Progress stage={stage} pct={pct} msg={msg} eta={eta} phaseAgo={phaseAgo} onCancel={cancel} />}
 
       {error && (
         <p className="mt-8 rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3 text-[15px] text-red-600 dark:text-red-400">

@@ -37,12 +37,17 @@ export default function Progress({
   stage,
   msg,
   eta,
+  phaseAgo = 0,
   onCancel,
 }: {
   stage: Stage | null;
   pct: number;
   msg: string;
   eta: Record<string, number> | null;
+  /** Seconds this phase had ALREADY been running when the page loaded. Non-zero only when
+   *  rejoining a run in flight — otherwise the countdown would restart from the full
+   *  estimate on every reload while the work carried on underneath. */
+  phaseAgo?: number;
   onCancel: () => void;
 }) {
   // WHICH STAGES WILL ACTUALLY RUN. A cached transcript skips download and transcription
@@ -78,6 +83,8 @@ export default function Progress({
   // What each finished phase ACTUALLY took. Once a stage is behind us its estimate is of no
   // further interest — the real number is better information and it is already known.
   const [spent, setSpent] = useState<Record<number, number>>({});
+  // Carried only until the first real stage change; after that the local clock is exact.
+  const [base, setBase] = useState(phaseAgo);
   useEffect(() => {
     const t0 = performance.now();
     const id = setInterval(() => {
@@ -86,6 +93,7 @@ export default function Progress({
       setMark((m) => {
         if (m.i === iRef.current) return m;
         if (m.i >= 0) setSpent((sp) => ({ ...sp, [m.i]: t - m.at }));
+        setBase(0);
         return { i: iRef.current, at: t };
       });
     }, 200);
@@ -99,7 +107,7 @@ export default function Progress({
   // segment sat stubbornly empty while the countdown ticked down beside it (Denis: "why is
   // the progress not seen for that stage?"). The stage change is a real event and the
   // estimate is not, so the real event is what the clock should hang from.
-  const inStage = mark.i === i ? Math.max(0, now - mark.at) : 0;
+  const inStage = base + (mark.i === i ? Math.max(0, now - mark.at) : 0);
 
   // Remaining = what is left of THIS stage, plus the estimates for the ones after it.
   const tail = totalEta ? secs.slice(i + 1).reduce((a, b) => a + b, 0) : 0;
