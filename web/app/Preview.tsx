@@ -3,6 +3,18 @@
 import { useEffect, useState } from "react";
 
 type Meta = { id: string; title: string; author: string; thumb: string };
+/** Duration and this video's own estimate, from the engine. oEmbed does not carry length,
+ *  and length is the one property that changes the wait by an order of magnitude. */
+type Cost = { id: string; duration: number; eta: number; cached: boolean };
+
+const ENGINE = "http://127.0.0.1:8765";
+
+function hms(secs: number): string {
+  const m = Math.floor(secs / 60);
+  const s = Math.round(secs % 60);
+  if (m >= 60) return `${Math.floor(m / 60)} h ${m % 60} min`;
+  return m ? `${m} min ${s.toString().padStart(2, "0")} sec` : `${s} sec`;
+}
 
 /** The video, the moment you paste the link.
  *
@@ -12,6 +24,7 @@ type Meta = { id: string; title: string; author: string; thumb: string };
  *  request and nothing else. */
 export default function Preview({ videoId }: { videoId: string }) {
   const [meta, setMeta] = useState<Meta | null>(null);
+  const [cost, setCost] = useState<Cost | null>(null);
 
   useEffect(() => {
     // No setMeta(null) here. Clearing state synchronously at the top of an effect causes
@@ -19,7 +32,15 @@ export default function Preview({ videoId }: { videoId: string }) {
     // ignore a result that belongs to the previous link, which is the actual requirement.
     if (!videoId) return;
     let alive = true;
-    fetch(`http://127.0.0.1:8765/api/oembed?v=${videoId}`)
+    fetch(`${ENGINE}/api/probe?v=${videoId}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (alive && d?.duration) {
+          setCost({ id: videoId, duration: d.duration, eta: d.eta, cached: !!d.cached });
+        }
+      })
+      .catch(() => {});
+    fetch(`${ENGINE}/api/oembed?v=${videoId}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (alive && d?.title) {
@@ -41,6 +62,7 @@ export default function Preview({ videoId }: { videoId: string }) {
   // Only the meta that belongs to THIS link — otherwise pasting a new URL briefly shows
   // the previous video's title.
   const m = meta?.id === videoId ? meta : null;
+  const c = cost?.id === videoId ? cost : null;
 
   return (
     <a
@@ -61,6 +83,14 @@ export default function Preview({ videoId }: { videoId: string }) {
         </p>
         {m?.author && (
           <p className="mt-0.5 truncate text-[13px] text-soft">{m.author}</p>
+        )}
+        {c && (
+          <p className="mt-1 text-[13px] text-soft">
+            <span className="font-medium text-ink">{hms(c.duration)}</span>
+            {" · "}
+            {c.cached ? "already transcribed, " : ""}
+            about {c.eta < 90 ? `${c.eta}s` : `${Math.round(c.eta / 60)} min`} to summarise
+          </p>
         )}
       </div>
     </a>

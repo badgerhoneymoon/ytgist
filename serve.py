@@ -326,6 +326,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith("/api/probe"):
+            self._probe()
         elif self.path.startswith("/api/current"):
             body = json.dumps(_snapshot()).encode()
             self.send_response(200)
@@ -364,6 +366,43 @@ class Handler(BaseHTTPRequestHandler):
             self._events()
         else:
             self.send_error(404)
+
+    _probe_cache = {}
+
+    def _probe(self):
+        """Title, channel, DURATION and this video's own estimate.
+
+        oEmbed has no duration, so the preview could say what the video IS but not what it
+        would COST — and the length is the one property that changes the wait by an order of
+        magnitude (Denis, 2026-08-09). One yt-dlp metadata call, memoised per id, so pasting
+        the same link twice is free.
+        """
+        from urllib.parse import parse_qs, urlparse
+        vid = (parse_qs(urlparse(self.path).query).get("v") or [""])[0]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{11}", vid or ""):
+            return self.send_error(400)
+
+        hit = Handler._probe_cache.get(vid)
+        if hit is None:
+            try:
+                info = ytgist.yt.probe(f"https://www.youtube.com/watch?v={vid}")
+            except Exception as exc:
+                hit = {"error": str(exc)}
+            else:
+                mins = info["duration"] / 60
+                cached = bool(ytgist.load_cached(vid))
+                hit = {"title": info["title"], "duration": info["duration"],
+                       "cached": cached,
+                       "eta": round(sum(ytgist.estimate(mins, cached).values()))}
+            Handler._probe_cache[vid] = hit
+
+        body = json.dumps(hit).encode()
+        self.send_response(200)
+        self._cors()
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _oembed(self):
         """Title + thumbnail for a video id. No API key, no quota — and it doubles as
