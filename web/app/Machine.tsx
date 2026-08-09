@@ -9,19 +9,24 @@ import type { GpuSample } from "./types";
  *  2026-08-09). Grey was worse than wrong — it is the page's colour for "inert", so a
  *  working machine looked switched off.
  *
- *  Green → amber → orange → red is the ordering everyone already knows, and the thresholds
- *  are Apple Silicon's own behaviour rather than round numbers: sustained work sits in the
- *  sixties, the fan becomes audible around eighty, and past ninety the SoC pulls its clocks
- *  back — which the ETA would otherwise report as an unexplained slowdown.
+ *  The second attempt still failed: the page's accent orange and a mid red are both DARK
+ *  WARM TONES on parchment, so hue alone could not separate them. They are separated by
+ *  LIGHTNESS now — a vivid bright orange against a deep near-black red, a luminance gap of
+ *  0.24 where the previous pair managed 0.07. Three warm colours in a row is hard; the
+ *  ramp has to move on two axes, not one.
+ *
+ *  Thresholds are Apple Silicon's behaviour rather than round numbers: sustained work sits
+ *  in the sixties, the fan becomes audible around eighty, and past ninety the SoC pulls its
+ *  clocks back — which the ETA would otherwise report as an unexplained slowdown.
  */
 export const FAN_AUDIBLE = 80;
 
 export function hueFor(c: number | null | undefined): string {
   if (c === undefined || c === null) return "var(--color-soft)";
-  if (c >= 90) return "#B3261E";                 // throttling
-  if (c >= FAN_AUDIBLE) return "var(--color-accent)";  // fan audible
-  if (c >= 60) return "#C8971B";                 // working
-  return "var(--color-good)";                    // cool
+  if (c >= 90) return "#8B1A1A";                 // throttling — deep, nearly black-red
+  if (c >= FAN_AUDIBLE) return "#F2700A";        // fan audible — vivid, bright orange
+  if (c >= 60) return "#D9A21B";                 // working — amber
+  return "var(--color-good)";                    // cool — green
 }
 
 /** The machine, while it works.
@@ -72,7 +77,6 @@ export default function Machine({
           // (Denis asked, 2026-08-09), so the word does the work the symbol could not.
           <span className="text-[11.5px] text-soft/60">{last.u}% busy</span>
         )}
-        {!!last?.w && <span className="text-[11.5px] text-soft/60">{last.w} W</span>}
       </span>
 
       {pts.length > 1 && (

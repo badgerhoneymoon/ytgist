@@ -55,7 +55,7 @@ export default function MachinePage() {
         <Machine series={series} width={420} height={56} />
         {last && (
           <p className="mt-3 text-[12.5px] text-soft/70 tabular-nums">
-            GPU {last.c ?? "—"}°C · CPU {last.cpu ?? "—"}°C · {last.u ?? "—"}% · {last.w ?? "—"} W
+            GPU {last.c ?? "—"}°C · CPU {last.cpu ?? "—"}°C · {last.u ?? "—"}% busy
           </p>
         )}
       </section>
