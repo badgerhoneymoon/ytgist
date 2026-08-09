@@ -129,12 +129,36 @@ export default function Progress({
 
   return (
     <div className="mt-10">
+      {/* PER-PHASE SECONDS, above their own segment (Denis, 2026-08-09). Numbers where
+          labels could not go: "47s" is three characters where "downloading audio" is
+          seventeen, so it survives a segment that a word could never fit in. Anything under
+          a tenth of the track still gets nothing — a truncated number is worse than none,
+          and that lesson already cost us one redesign. */}
+      {totalEta > 0 && (
+        <div className="mb-1.5 flex gap-1">
+          {steps.map((s, n) => (
+            <div key={s.key} style={{ flex: weights[n] }} className="min-w-0">
+              <span
+                className={[
+                  "block text-[11px] tabular-nums transition-colors duration-300",
+                  weights[n] / totalEta < 0.1 ? "invisible" : "",
+                  n === i ? "font-semibold text-accent" : "text-soft/50",
+                ].join(" ")}
+              >
+                {secs[n] < 60 ? `${Math.round(secs[n])}s` : `${Math.round(secs[n] / 60)}m`}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="flex gap-1" aria-label="progress">
         {steps.map((s, n) => {
           const fill = fillOf(n);
           return (
             <div
               key={s.key}
+              title={`${s.label} · about ${Math.round(secs[n])}s`}
               className="h-1.5 overflow-hidden rounded-full bg-line/70"
               style={{ flex: weights[n] }}
             >

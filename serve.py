@@ -24,6 +24,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import timing_log
 import ytgist
 
 _RUN = threading.Lock()   # the 27B is one physical resource; runs queue, never overlap
@@ -289,6 +290,22 @@ class Handler(BaseHTTPRequestHandler):
             body = PAGE.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path.startswith("/api/limits"):
+            # The page used to hard-code "under 20 min ~1 min". Those numbers came from my
+            # head; the engine has been measuring the real ones all along (Denis, 2026-08-09).
+            bands = []
+            for label, mins in (("under 20 min", 12), ("about an hour", 60), ("2 hours", 120)):
+                secs = sum(ytgist.estimate(mins, cached=False).values())
+                bands.append({"label": label, "secs": round(secs)})
+            body = json.dumps({"bands": bands,
+                               "max_hours": round(ytgist.max_minutes() / 60, 1),
+                               "runs": len(timing_log._rows())}).encode()
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

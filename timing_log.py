@@ -84,7 +84,7 @@ def record_expand(minutes: float, chars: int, warm: bool, secs: float, native: b
     try:
         os.makedirs(os.path.dirname(EXPANDS), exist_ok=True)
         row = {"at": time.time(), "window_min": round(minutes, 2), "chars": int(chars),
-               "warm": bool(warm), "audio_mb": round(float(audio_mb or 0), 2), "native": bool(native), "power": power_mode(),
+               "warm": bool(warm), "native": bool(native), "power": power_mode(),
                "secs": round(float(secs), 2)}
         with open(EXPANDS, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")

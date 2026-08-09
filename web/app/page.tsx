@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Frame, Gist, Stage } from "./types";
 import { parseGist } from "./parse";
 import History from "./History";
@@ -83,6 +83,17 @@ export default function Home() {
   // itself is the point.
   const [native, setNative] = useState(false);
   const [eta, setEta] = useState<Record<string, number> | null>(null);
+  // MEASURED, not asserted. These numbers used to be hard-coded from my own guesses; the
+  // engine has been recording the real ones all along, so it serves them (Denis, 2026-08-09).
+  const [limits, setLimits] = useState<
+    { bands: { label: string; secs: number }[]; max_hours: number } | null
+  >(null);
+  useEffect(() => {
+    fetch(`${ENGINE}/api/limits`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then(setLimits)
+      .catch(() => {});
+  }, []);
 
   const start = useCallback(
     async (
@@ -279,23 +290,30 @@ export default function Home() {
 
       </form>
 
-      {/* The honest cost, before you commit to it. Length is the one thing that changes
-          the wait by an order of magnitude, and nothing on the page said so — a 90-minute
-          interview looks exactly like a 5-minute clip until you are four minutes in. */}
-      <p className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-soft/80">
-        <span className="flex items-center gap-1.5">
-          <i className="inline-block h-1.5 w-1.5 rounded-full bg-good" />
-          under 20 min <b className="font-medium text-soft">~1 min</b>
-        </span>
-        <span className="flex items-center gap-1.5">
-          <i className="inline-block h-1.5 w-1.5 rounded-full bg-accent/70" />
-          about an hour <b className="font-medium text-soft">~3 min</b>
-        </span>
-        <span className="flex items-center gap-1.5">
-          <i className="inline-block h-1.5 w-1.5 rounded-full bg-line" />
-          over 3.8 h <b className="font-medium text-soft">refused</b>
-        </span>
-      </p>
+      {/* The honest cost, before you commit to it. Length changes the wait by an order of
+          magnitude and nothing on the page said so — a 90-minute interview looks exactly
+          like a 5-minute clip until you are four minutes in. */}
+      {limits && (
+        <p className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-soft/80">
+          {limits.bands.map((b, n) => (
+            <span key={b.label} className="flex items-center gap-1.5">
+              <i
+                className={`inline-block h-1.5 w-1.5 rounded-full ${
+                  n === 0 ? "bg-good" : n === 1 ? "bg-accent/70" : "bg-line"
+                }`}
+              />
+              {b.label}{" "}
+              <b className="font-medium text-soft">
+                {b.secs < 90 ? `~${Math.round(b.secs)}s` : `~${Math.round(b.secs / 60)} min`}
+              </b>
+            </span>
+          ))}
+          <span className="flex items-center gap-1.5">
+            <i className="inline-block h-1.5 w-1.5 rounded-full bg-line" />
+            over {limits.max_hours} h <b className="font-medium text-soft">refused</b>
+          </span>
+        </p>
+      )}
 
       {/* The reason, right where the refusal is. */}
       {badLink && (
