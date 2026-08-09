@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Frame, Gist, Stage } from "./types";
+import type { Frame, Gist, GpuStats, Stage } from "./types";
 import { parseGist } from "./parse";
 import History from "./History";
 import Preview from "./Preview";
@@ -84,7 +84,7 @@ export default function Home() {
   const [native, setNative] = useState(false);
   const [eta, setEta] = useState<Record<string, number> | null>(null);
   const [phaseAgo, setPhaseAgo] = useState(0);
-  const [gpu, setGpu] = useState<Frame["gpu"] | null>(null);
+  const [gpu, setGpu] = useState<GpuStats | null>(null);
   // MEASURED, not asserted. These numbers used to be hard-coded from my own guesses; the
   // engine has been recording the real ones all along, so it serves them (Denis, 2026-08-09).
   const [limits, setLimits] = useState<

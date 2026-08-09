@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
-import type { Stage } from "./types";
+import type { GpuStats, Stage } from "./types";
 
 /** ONE segmented track, not a bar plus a row of pills.
  *
@@ -46,7 +46,7 @@ export default function Progress({
   msg: string;
   eta: Record<string, number> | null;
   /** What the GPU is doing, sampled with the engine's heartbeat. It explains the fan. */
-  gpu?: { util?: number; mem_gb?: number } | null;
+  gpu?: GpuStats | null;
   /** Seconds this phase had ALREADY been running when the page loaded. Non-zero only when
    *  rejoining a run in flight — otherwise the countdown would restart from the full
    *  estimate on every reload while the work carried on underneath. */
@@ -242,17 +242,7 @@ export default function Progress({
           {msg && <span className="text-soft"> · {msg}</span>}
         </p>
         <span className="flex shrink-0 items-center gap-2.5 text-[12.5px] tabular-nums text-soft/70">
-          {gpu?.util !== undefined && (
-            <span
-              title={`GPU ${gpu.util}% busy${gpu.mem_gb ? `, ${gpu.mem_gb} GB held` : ""}`}
-              className={
-                gpu.util > 80 ? "text-accent" : gpu.util > 40 ? "text-soft" : "text-soft/50"
-              }
-            >
-              GPU {gpu.util}%
-              {gpu.mem_gb ? ` · ${gpu.mem_gb} GB` : ""}
-            </span>
-          )}
+          {gpu && <Machine gpu={gpu} />}
           {done
             ? "done"
             : over
@@ -341,4 +331,33 @@ function left(secs: number): string {
   const m = Math.floor(secs / 60);
   const s = Math.round(secs % 60);
   return m ? `~${m}m ${s}s left` : `~${s}s left`;
+}
+
+/** THE FAN, EXPLAINED. Thresholds are Apple Silicon's own behaviour rather than round
+ *  numbers: sustained work sits in the sixties, the fan becomes audible around the
+ *  seventies, and the nineties is where the SoC starts pulling its clocks back — which the
+ *  ETA would otherwise report as an unexplained slowdown. */
+function Machine({ gpu }: { gpu: GpuStats }) {
+  const c = gpu.gpu_c;
+  const hue =
+    c === undefined ? "text-soft/50"
+    : c >= 90 ? "text-red-600"
+    : c >= 75 ? "text-accent"
+    : c >= 60 ? "text-soft"
+    : "text-good";
+
+  const parts: string[] = [];
+  if (gpu.util !== undefined) parts.push(`GPU ${gpu.util}%`);
+  if (gpu.mem_gb) parts.push(`${gpu.mem_gb} GB`);
+  if (gpu.watts) parts.push(`${gpu.watts} W`);
+  if (gpu.fan_rpm) parts.push(`fan ${gpu.fan_rpm} rpm`);
+
+  return (
+    <span className={`flex items-center gap-1.5 ${hue}`} title={parts.join(" · ")}>
+      {c !== undefined && <span className="font-semibold">{c}°C</span>}
+      {gpu.util !== undefined && (
+        <span className="text-soft/50">GPU {gpu.util}%</span>
+      )}
+    </span>
+  );
 }

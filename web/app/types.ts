@@ -13,7 +13,7 @@ export type Frame = {
   error?: string;
   stopped?: boolean;
   expansions?: Record<string, string>;   // step start second → saved detail
-  gpu?: { util?: number; mem_gb?: number };
+  gpu?: GpuStats;
   eta?: Record<string, number>;   // seconds per remaining phase, sent once length is known
   video_minutes?: number;
   // final frame only
@@ -50,3 +50,14 @@ export type Gist = {
 /** A cited moment inside an answer: the model wrote [MM:SS], the engine verified it
  *  against the transcript and turned it into a link. */
 export type Cite = { stamp: string; href: string };
+
+/** What the machine is doing while it works. Temperature only when macmon is installed;
+ *  utilisation and GPU-held memory always. */
+export type GpuStats = {
+  util?: number;
+  mem_gb?: number;
+  gpu_c?: number;
+  cpu_c?: number;
+  watts?: number;
+  fan_rpm?: number;
+};
