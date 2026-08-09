@@ -52,8 +52,11 @@ def power_mode() -> str:
     2026-08-09). A split that never fires is worse than no split: it looks like it is
     working.
 
-    On Apple Silicon `pmset -g` reports powermode 0 automatic, 1 low, 2 high. The older
-    `lowpowermode` spelling is still accepted as a fallback."""
+    `pmset -g` reports powermode: 0 automatic, 1 low, 2 high. Nothing else is accepted —
+    an older macOS spelling was carried here as a fallback and Denis was right to ask what
+    it was for. It is a branch for a system this tool does not run on, which can never be
+    exercised or tested, and an unexercised branch keyed on a name is precisely what caused
+    the bug above."""
     try:
         out = subprocess.run(["pmset", "-g"], capture_output=True, text=True,
                              timeout=3).stdout
@@ -66,8 +69,6 @@ def power_mode() -> str:
             continue
         if parts[0] == "powermode":
             return {"1": "low", "2": "high"}.get(parts[-1], "normal")
-        if parts[0] == "lowpowermode":
-            return "low" if parts[-1] not in ("0", "false") else "normal"
     return "normal"
 
 
