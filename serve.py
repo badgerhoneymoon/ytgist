@@ -24,6 +24,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gpu
 import timing_log
 import ytgist
 
@@ -547,7 +548,12 @@ class Handler(BaseHTTPRequestHandler):
             def beat():
                 t0 = time.time()
                 while not stop.wait(10):
-                    q.put({**last, "elapsed": round(time.time() - t0)})
+                    beat_frame = {**last, "elapsed": round(time.time() - t0)}
+                    g = gpu.stats()
+                    if g:
+                        beat_frame["gpu"] = g
+                        _current["gpu"] = g
+                    q.put(beat_frame)
 
             threading.Thread(target=beat, daemon=True).start()
             try:

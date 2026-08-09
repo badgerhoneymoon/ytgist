@@ -13,6 +13,7 @@ export type Frame = {
   error?: string;
   stopped?: boolean;
   expansions?: Record<string, string>;   // step start second → saved detail
+  gpu?: { util?: number; mem_gb?: number };
   eta?: Record<string, number>;   // seconds per remaining phase, sent once length is known
   video_minutes?: number;
   // final frame only

@@ -37,6 +37,7 @@ export default function Progress({
   stage,
   msg,
   eta,
+  gpu,
   phaseAgo = 0,
   onCancel,
 }: {
@@ -44,6 +45,8 @@ export default function Progress({
   pct: number;
   msg: string;
   eta: Record<string, number> | null;
+  /** What the GPU is doing, sampled with the engine's heartbeat. It explains the fan. */
+  gpu?: { util?: number; mem_gb?: number } | null;
   /** Seconds this phase had ALREADY been running when the page loaded. Non-zero only when
    *  rejoining a run in flight — otherwise the countdown would restart from the full
    *  estimate on every reload while the work carried on underneath. */
@@ -239,6 +242,17 @@ export default function Progress({
           {msg && <span className="text-soft"> · {msg}</span>}
         </p>
         <span className="flex shrink-0 items-center gap-2.5 text-[12.5px] tabular-nums text-soft/70">
+          {gpu?.util !== undefined && (
+            <span
+              title={`GPU ${gpu.util}% busy${gpu.mem_gb ? `, ${gpu.mem_gb} GB held` : ""}`}
+              className={
+                gpu.util > 80 ? "text-accent" : gpu.util > 40 ? "text-soft" : "text-soft/50"
+              }
+            >
+              GPU {gpu.util}%
+              {gpu.mem_gb ? ` · ${gpu.mem_gb} GB` : ""}
+            </span>
+          )}
           {done
             ? "done"
             : over

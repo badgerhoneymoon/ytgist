@@ -84,6 +84,7 @@ export default function Home() {
   const [native, setNative] = useState(false);
   const [eta, setEta] = useState<Record<string, number> | null>(null);
   const [phaseAgo, setPhaseAgo] = useState(0);
+  const [gpu, setGpu] = useState<Frame["gpu"] | null>(null);
   // MEASURED, not asserted. These numbers used to be hard-coded from my own guesses; the
   // engine has been recording the real ones all along, so it serves them (Denis, 2026-08-09).
   const [limits, setLimits] = useState<
@@ -164,6 +165,7 @@ export default function Home() {
       if (f.stage) setStage(f.stage === "cached" ? "summarise" : f.stage);
       if (f.msg) setMsg(f.msg);
       if (f.eta) setEta(f.eta);
+      if (f.gpu) setGpu(f.gpu);
       if (f.error) {
         setError(f.error);
         done();
@@ -440,7 +442,7 @@ export default function Home() {
       )}
       <Preview videoId={videoId ?? ""} native={native} />
 
-      {busy && <Progress stage={stage} pct={pct} msg={msg} eta={eta} phaseAgo={phaseAgo} onCancel={cancel} />}
+      {busy && <Progress stage={stage} pct={pct} msg={msg} eta={eta} gpu={gpu} phaseAgo={phaseAgo} onCancel={cancel} />}
 
       {error && (
         <p className="mt-8 rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3 text-[15px] text-red-600 dark:text-red-400">
