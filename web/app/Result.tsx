@@ -91,12 +91,24 @@ export default function Result({
                   {k} <b className="font-semibold text-ink">{dur(v)}</b>
                 </span>
               ))}
-              <span className="ml-auto">
-                {total.toFixed(1)}s
-                {gist.duration > 0 &&
-                  ` · ${Math.round(gist.duration / total)}× faster than watching`}
-              </span>
+
             </div>
+
+            {gist.duration > 0 && (
+              <>
+                <p className="mt-7 flex items-baseline gap-2.5">
+                  <span className="text-[34px] font-semibold leading-none tracking-[-0.02em] text-ink">
+                    {Math.round(gist.duration / total)}×
+                  </span>
+                  <span className="text-[15px] leading-tight text-soft">
+                    faster than watching it
+                  </span>
+                </p>
+                <p className="mt-1.5 text-[13.5px] text-soft/80">
+                  {Math.round(gist.duration / 60)} min of video, read in {dur(total)}
+                </p>
+              </>
+            )}
 
             {/* An ABSENT phase is information: without this line the bar reads as broken. */}
             {gist.cached && (
