@@ -91,6 +91,16 @@ def estimate(minutes: float, cached: bool) -> dict:
             return (mbpm * minutes) / bw
         return None
 
+    # Summarising is driven by how much is WRITTEN as well as how much is read, and the
+    # step count is known before the run starts.
+    sm = timing_log.fit_summarise()
+
+    def summarise_cost():
+        if not sm:
+            return None
+        lo, _, hi = gist_prompt.steps_for(minutes).partition("-")
+        return sm[0] * (int(lo) + int(hi)) / 2 + sm[1] * minutes
+
     def cost(phase):
         """Learned affine cost if we have one, else the hand-fitted per-minute constant."""
         fit = known.get(phase)
@@ -103,12 +113,13 @@ def estimate(minutes: float, cached: bool) -> dict:
         load = load[0] + load[1] * minutes
 
     if cached:
-        return {"model load": load, "summarise": cost("summarise")}
+        return {"model load": load,
+                "summarise": summarise_cost() or cost("summarise")}
     return {"read info": 2.0,
             "download": download_cost() or cost("download"),
             "transcribe": cost("transcribe"),
             "model load": load,
-            "summarise": cost("summarise")}
+            "summarise": summarise_cost() or cost("summarise")}
 
 
 EXPAND_MAX = 8 * 60         # a step's span, capped — beyond this it stops being one point

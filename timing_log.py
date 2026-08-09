@@ -167,6 +167,43 @@ def _fit(rows, phase):
     return (max(my - slope * mx, 0.0), slope)
 
 
+def fit_summarise(rows=None):
+    """(seconds per takeaway, seconds per minute of video) — or None.
+
+    THE "FIXED" PART WAS NEVER FIXED; it is proportional to how much gets WRITTEN, and what
+    gets written is the number of takeaways. A 34-second Short still gets five of them, so
+    it cost 23s of generation against a prediction of 3.6s — 207% out — while every other
+    phase in that run was within a second (2026-08-09).
+
+    Two drivers, both known before the run starts: steps (from the video's length band) and
+    minutes (prefill). Solved as an ordinary two-variable least squares through the origin,
+    because a summary with no steps and no transcript costs nothing."""
+    import gist_prompt
+    rows = _rows() if rows is None else rows
+    pts = []
+    for r in rows:
+        m, y = r.get("minutes", 0), (r.get("timings") or {}).get("summarise")
+        if not y or m <= 0:
+            continue
+        lo, _, hi = gist_prompt.steps_for(m).partition("-")
+        pts.append(((int(lo) + int(hi)) / 2, m, y))
+    if len(pts) < MIN_SAMPLES + 1:
+        return None
+    saa = sum(a * a for a, _, _ in pts)
+    sbb = sum(b * b for _, b, _ in pts)
+    sab = sum(a * b for a, b, _ in pts)
+    say = sum(a * y for a, _, y in pts)
+    sby = sum(b * y for _, b, y in pts)
+    det = saa * sbb - sab * sab
+    if abs(det) < 1e-9:
+        return None
+    per_step = (say * sbb - sby * sab) / det
+    per_min = (sby * saa - say * sab) / det
+    if per_step < 0 or per_min < 0:
+        return None                       # a thin sample fitting nonsense; keep the old way
+    return (per_step, per_min)
+
+
 def bandwidth(rows=None):
     """Median MB/s over runs that actually downloaded something, or None.
 
