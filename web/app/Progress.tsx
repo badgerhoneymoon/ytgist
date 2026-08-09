@@ -92,8 +92,14 @@ export default function Progress({
       setNow(t);
       setMark((m) => {
         if (m.i === iRef.current) return m;
-        if (m.i >= 0) setSpent((sp) => ({ ...sp, [m.i]: t - m.at }));
-        setBase(0);
+        // ONLY a real stage change discards the carried time. The mark starts at -1, so the
+        // first tick after mount looked like a transition and threw away the phase_elapsed
+        // we had just rejoined with — the bar showed the right number for one frame and
+        // then reset to zero (Denis, 2026-08-09).
+        if (m.i >= 0) {
+          setSpent((sp) => ({ ...sp, [m.i]: t - m.at }));
+          setBase(0);
+        }
         return { i: iRef.current, at: t };
       });
     }, 200);
