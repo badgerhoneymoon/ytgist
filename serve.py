@@ -458,7 +458,7 @@ class Handler(BaseHTTPRequestHandler):
         ctl = Control()
         _ctl[job] = ctl
         _publish(job, req.get("url", ""), "", bool(req.get("native")))
-        threading.Thread(target=self._work, args=(q, req, ctl), daemon=True).start()
+        threading.Thread(target=self._work, args=(q, req, ctl, job), daemon=True).start()
         body = json.dumps({"job": job}).encode()
         self.send_response(200)
         self._cors()
@@ -468,7 +468,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     @staticmethod
-    def _work(q, req, ctl=None):
+    def _work(q, req, ctl=None, job=None):
         try:
             if not _RUN.acquire(blocking=False):
                 q.put({"stage": "summarise", "pct": 5,
@@ -540,6 +540,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:                      # a crash must reach the page, not just stderr
             traceback.print_exc()
             q.put({"error": f"{type(e).__name__}: {e}"})
+        finally:
+            # A job that ends WITHOUT a result — stopped, refused, crashed — must leave no
+            # trace in the snapshot, or a reload resurrects the view of work that is not
+            # happening: press Stop, reload, and the bar carries on summarising something
+            # already dead (Denis, 2026-08-09).
+            if job and _current.get("job") == job and _current.get("result") is None:
+                _current.update({"job": None, "url": "", "frame": {}, "at": 0.0})
+
 
 
 if __name__ == "__main__":
