@@ -346,18 +346,16 @@ function Machine({ gpu }: { gpu: GpuStats }) {
     : c >= 60 ? "text-soft"
     : "text-good";
 
-  const parts: string[] = [];
-  if (gpu.util !== undefined) parts.push(`GPU ${gpu.util}%`);
-  if (gpu.mem_gb) parts.push(`${gpu.mem_gb} GB`);
-  if (gpu.watts) parts.push(`${gpu.watts} W`);
-  if (gpu.fan_rpm) parts.push(`fan ${gpu.fan_rpm} rpm`);
-
+  // ON SCREEN, not on hover (Denis, 2026-08-09). A tooltip is for something you might
+  // want; this is the answer to "why is my fan running", which you want the moment you
+  // wonder. Only the temperature is coloured — the rest is context, and colouring
+  // everything would make the one number that changes meaning stop standing out.
   return (
-    <span className={`flex items-center gap-1.5 ${hue}`} title={parts.join(" · ")}>
-      {c !== undefined && <span className="font-semibold">{c}°C</span>}
-      {gpu.util !== undefined && (
-        <span className="text-soft/50">GPU {gpu.util}%</span>
-      )}
+    <span className="flex items-center gap-2 text-[12px]">
+      {c !== undefined && <span className={`font-semibold ${hue}`}>{c}°C</span>}
+      {gpu.util !== undefined && <span className="text-soft/50">GPU {gpu.util}%</span>}
+      {!!gpu.watts && <span className="text-soft/50">{gpu.watts} W</span>}
+      {!!gpu.fan_rpm && <span className="text-soft/50">{gpu.fan_rpm} rpm</span>}
     </span>
   );
 }
