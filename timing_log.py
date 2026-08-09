@@ -51,7 +51,7 @@ def power_mode() -> str:
 
 
 def record(minutes: float, cached: bool, ctx: int, timings: dict, native: bool = False,
-           predicted: dict | None = None, warm: bool = False):
+           predicted: dict | None = None, warm: bool = False, audio_mb: float = 0.0):
     """Append one finished run, WITH the prediction it was given.
 
     Storing only the actuals makes the log self-improving but unfalsifiable — you can see
@@ -62,7 +62,7 @@ def record(minutes: float, cached: bool, ctx: int, timings: dict, native: bool =
         os.makedirs(os.path.dirname(LOG), exist_ok=True)
         row = {"at": time.time(), "minutes": round(minutes, 2), "cached": bool(cached),
                "ctx": int(ctx or 0), "power": power_mode(), "native": bool(native),
-               "warm": bool(warm),
+               "warm": bool(warm), "audio_mb": round(float(audio_mb or 0), 2),
                "timings": {k: round(float(v), 2) for k, v in (timings or {}).items()
                            if not k.startswith("_")},
                "predicted": {k: round(float(v), 2) for k, v in (predicted or {}).items()}}
@@ -84,7 +84,7 @@ def record_expand(minutes: float, chars: int, warm: bool, secs: float, native: b
     try:
         os.makedirs(os.path.dirname(EXPANDS), exist_ok=True)
         row = {"at": time.time(), "window_min": round(minutes, 2), "chars": int(chars),
-               "warm": bool(warm), "native": bool(native), "power": power_mode(),
+               "warm": bool(warm), "audio_mb": round(float(audio_mb or 0), 2), "native": bool(native), "power": power_mode(),
                "secs": round(float(secs), 2)}
         with open(EXPANDS, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
@@ -165,6 +165,41 @@ def _fit(rows, phase):
     slope = sum((x - mx) * (y - my) for x, y in pts) / var
     slope = max(slope, 0.0)
     return (max(my - slope * mx, 0.0), slope)
+
+
+def bandwidth(rows=None):
+    """Median MB/s over runs that actually downloaded something, or None.
+
+    Only ~8% of a run touches the network, so this is not a big lever — but without it the
+    log cannot distinguish a slow connection from a long video, and a bad-wifi day shows up
+    as unexplained variance in the download phase."""
+    rows = _rows() if rows is None else rows
+    v = [r["audio_mb"] / r["timings"]["download"]
+         for r in rows
+         if r.get("audio_mb", 0) > 0.5 and (r.get("timings") or {}).get("download", 0) > 0.2]
+    return statistics.median(v) if len(v) >= MIN_SAMPLES else None
+
+
+def mb_per_minute(rows=None):
+    """How many megabytes a minute of audio comes to, at yt-dlp's chosen bitrate."""
+    rows = _rows() if rows is None else rows
+    v = [r["audio_mb"] / r["minutes"] for r in rows
+         if r.get("audio_mb", 0) > 0.5 and r.get("minutes", 0) > 0.5]
+    return statistics.median(v) if len(v) >= MIN_SAMPLES else None
+
+
+def network_report() -> str:
+    rows = _rows()
+    bw = bandwidth(rows)
+    if bw is None:
+        return "network: not enough downloads logged yet"
+    recent = [r["audio_mb"] / r["timings"]["download"]
+              for r in rows[-5:]
+              if r.get("audio_mb", 0) > 0.5 and (r.get("timings") or {}).get("download", 0) > 0.2]
+    now = statistics.median(recent) if recent else bw
+    tag = ("slower than usual" if now < bw * 0.6
+           else "faster than usual" if now > bw * 1.6 else "normal")
+    return f"network: {bw:.1f} MB/s typical, {now:.1f} MB/s lately ({tag})"
 
 
 def _median_rate(rows, phase):
@@ -269,6 +304,7 @@ if __name__ == "__main__":
     print(summary())
     print(drift())
     print(expand_report())
+    print(network_report())
     for p, a, e in accuracy()[-8:]:
         print(f"    predicted {p:>6.0f}s   actual {a:>6.0f}s   {e:+.0f}%")
     for phase in SCALING:

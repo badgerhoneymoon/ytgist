@@ -83,6 +83,14 @@ def estimate(minutes: float, cached: bool) -> dict:
     known = timing_log.learned(timing_log.power_mode(), ctx,
                                warm=model_client.warm_available())
 
+    mbpm = timing_log.mb_per_minute()
+    bw = timing_log.bandwidth()
+
+    def download_cost():
+        if mbpm and bw:
+            return (mbpm * minutes) / bw
+        return None
+
     def cost(phase):
         """Learned affine cost if we have one, else the hand-fitted per-minute constant."""
         fit = known.get(phase)
@@ -97,7 +105,7 @@ def estimate(minutes: float, cached: bool) -> dict:
     if cached:
         return {"model load": load, "summarise": cost("summarise")}
     return {"read info": 2.0,
-            "download": cost("download"),
+            "download": download_cost() or cost("download"),
             "transcribe": cost("transcribe"),
             "model load": load,
             "summarise": cost("summarise")}
@@ -421,7 +429,7 @@ def run(url, model_key="dense", refresh=False, progress=None,
             step("download", 15, f"{info['duration']/60:.0f} min of audio")
             with phase("download"):
                 wav = yt.fetch_audio(url, d)
-            size = os.path.getsize(wav) / 1e6
+            size = audio_mb = os.path.getsize(wav) / 1e6
             log(f"→ transcribing {size:.0f} MB of audio …")
             step("transcribe", 40, f"{size:.0f} MB on the GPU")
             t0 = time.time()
@@ -465,7 +473,7 @@ def run(url, model_key="dense", refresh=False, progress=None,
     # would otherwise need to size it. Two chars per token is the Cyrillic rate measured
     # on a real transcript; it over-estimates Latin text, and over-estimating only costs a
     # little unused context, where under-estimating costs a whole halved summary.
-    srv_ctx, srv_warm = 0, False
+    srv_ctx, srv_warm, audio_mb = 0, False, 0.0
     est = len(gist_prompt.system_for(native) + user) // 2 + 1400
     with phase("model load"):
         _srv = model_client.Server.acquire(need_tokens=est, model=MODELS[model_key], log=log)
@@ -517,7 +525,7 @@ def run(url, model_key="dense", refresh=False, progress=None,
                 "sentences": sentences,   # the UI shows the evidence behind each claim
                 "expansions": {}}
     timing_log.record(meta.get("duration", 0) / 60, was_cached, srv_ctx, timings, native,
-                      predicted=predicted, warm=srv_warm)
+                      predicted=predicted, warm=srv_warm, audio_mb=audio_mb)
     total = sum(timings.values())
     log("\n  " + " · ".join(f"{k} {v:g}s" for k, v in timings.items())
         + f"  =  {total:.0f}s total")
