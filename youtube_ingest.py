@@ -69,8 +69,14 @@ def _classify(stderr: str) -> tuple:
         # network rule first and buried the real cause (2026-08-08: the installed
         # yt-dlp was 10 months old and could not handle YouTube's SABR streaming).
         # Specific rules must come BEFORE generic ones.
-        ("blocked", "403: forbidden", "YouTube refused the download (HTTP 403). Your "
-                                      "yt-dlp is probably out of date — try: brew upgrade yt-dlp"),
+        # 403 is USUALLY THE MISSING JS RUNTIME, not a stale yt-dlp. YouTube's player
+        # challenges need JavaScript to solve, and without a runtime yt-dlp quietly falls
+        # back to formats that can 403. The old message here blamed the version and sent
+        # Denis to `brew upgrade yt-dlp`, which reported "already installed" and left him
+        # no better off (2026-08-10).
+        ("blocked", "403: forbidden", "YouTube refused the download (HTTP 403). Usually a "
+                                      "missing JavaScript runtime — install one with: "
+                                      "brew install deno"),
         ("blocked", "sabr", "YouTube is forcing SABR streaming for this video and your "
                             "yt-dlp can't handle it — try: brew upgrade yt-dlp"),
         ("network", "temporary failure", "Network problem reaching YouTube."),
@@ -103,6 +109,19 @@ def _run(cmd, timeout):
             p.kill()
         p.communicate()
         raise IngestError("network", f"yt-dlp timed out after {timeout}s")
+
+
+def js_runtime_ok() -> bool:
+    """Can yt-dlp solve YouTube's player challenges?
+
+    Without a JavaScript runtime it still runs, warns, and falls back to formats that 403
+    partway through — a failure that looks like a network problem an hour later. Checking
+    for the runtime turns that into something sayable up front."""
+    import shutil
+    for exe in ("deno", "node", "bun", "quickjs"):
+        if shutil.which(exe):
+            return True
+    return False
 
 
 def probe(url: str) -> dict:

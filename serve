@@ -1,3 +1,7 @@
 #!/bin/bash
+# yt-dlp needs a JavaScript runtime for YouTube's player challenges, and an old
+# deno at ~/.deno/bin shadows brew's newer one on PATH — yt-dlp rejects the old
+# one and silently falls back to formats that 403 (2026-08-10).
+export PATH="/opt/homebrew/bin:$PATH"
 exec /Users/denisburkatskiy/Python/dictate/.venv/bin/python \
      /Users/denisburkatskiy/Python/ytgist/serve.py "$@"
