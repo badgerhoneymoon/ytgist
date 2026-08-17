@@ -74,7 +74,11 @@ def _classify(stderr: str) -> tuple:
         # back to formats that can 403. The old message here blamed the version and sent
         # Denis to `brew upgrade yt-dlp`, which reported "already installed" and left him
         # no better off (2026-08-10).
-        ("blocked", "403: forbidden", "YouTube refused the download (HTTP 403). Usually a "
+        # BOTH SPELLINGS. yt-dlp writes "HTTP Error 403: Forbidden"; ffmpeg, which handles
+        # some fetches, writes "HTTP error 403 Forbidden" with no colon — and matching only
+        # the first meant the real-world failure classified as "unknown" and so was never
+        # retried (2026-08-10).
+        ("blocked", "403", "YouTube refused the download (HTTP 403). Usually a "
                                       "missing JavaScript runtime — install one with: "
                                       "brew install deno"),
         ("blocked", "sabr", "YouTube is forcing SABR streaming for this video and your "
@@ -149,7 +153,14 @@ def probe(url: str) -> dict:
             "language": meta.get("language"), "live_status": status}
 
 
-def fetch_audio(url: str, dest_dir: str, timeout: int = 3600) -> str:
+# Tried in order. None means yt-dlp's own default. Measured against a video YouTube was
+# actively refusing: default resolved to ANDROID_VR and 403'd, web_embedded served it.
+# `web`, `tv`, `android` and `ios` all answered "not available" — they need PO tokens now,
+# so listing them would only add dead attempts.
+_CLIENTS = (None, "web_embedded", "default")
+
+
+def fetch_audio(url: str, dest_dir: str, timeout: int = 3600, on_retry=None) -> str:
     """Download AUDIO ONLY as 16 kHz mono WAV. Returns the path.
 
     -f bestaudio is LOAD-BEARING: `-x` alone still downloads yt-dlp's default
@@ -157,18 +168,57 @@ def fetch_audio(url: str, dest_dir: str, timeout: int = 3600) -> str:
     cross the network for a transcript (Codex review r1). The brief said audio only.
 
     --match-filter is a SECOND live check at download time, closing the race where an
-    upcoming premiere goes live between probe() and here."""
-    rc, _out, err = _run([
-        "yt-dlp", "--ignore-config", "--no-playlist",
-        "-f", "bestaudio",
-        "--match-filter", "live_status != 'is_live' & live_status != 'is_upcoming'",
-        "-x", "--audio-format", "wav",
-        "--postprocessor-args", "ExtractAudio:-ar 16000 -ac 1",
-        "--no-progress", "-o", os.path.join(dest_dir, "%(id)s.%(ext)s"),
-        "--", url], timeout=timeout)
-    if rc != 0:
+    upcoming premiere goes live between probe() and here.
+
+    IT RETRIES, because YouTube refuses transiently. A 403 on the media URL killed an
+    entire run and the same video downloaded on the next click, minutes later, unchanged
+    (Denis, 2026-08-10). Every other fragile thing here already recovers by itself — the
+    run lock queues, the warm pool reaps, a dropped stream rejoins, SIGTERM waits for the
+    job — while the one step that talks to a third party over HTTP had no retry at all.
+
+    Each attempt re-runs yt-dlp from scratch AND ASKS A DIFFERENT PLAYER CLIENT. Media URLs
+    are short-lived, IP-bound and signed per client, so retrying the same one is knocking on
+    the same door twice — and measurement showed that door was the problem: yt-dlp's default
+    picks ANDROID_VR, whose URLs were being refused while WEB_EMBEDDED_PLAYER served the
+    same audio without complaint (2026-08-10)."""
+    err = ""
+    for attempt, client in enumerate(_CLIENTS):
+        rc, _out, err = _run([
+            "yt-dlp", "--ignore-config", "--no-playlist",
+            # bestaudio FIRST and audio-only if at all possible — `-x` alone would fetch
+            # video and throw it away, which for an hour-long 1080p talk is the whole point
+            # of the tool undone (Codex r1). But a fallback client offers a different format
+            # set, and web_embedded has no audio-only stream at all, so refusing to fall
+            # back to a combined one means the fallback cannot work (2026-08-10).
+            "-f", "bestaudio/bestaudio*/best",
+            *(["--extractor-args", f"youtube:player_client={client}"] if client else []),
+            "--match-filter", "live_status != 'is_live' & live_status != 'is_upcoming'",
+            "-x", "--audio-format", "wav",
+            "--postprocessor-args", "ExtractAudio:-ar 16000 -ac 1",
+            # yt-dlp's own retries, for failures inside a single extraction.
+            "--retries", "5", "--fragment-retries", "5", "--extractor-retries", "3",
+            "--no-progress", "-o", os.path.join(dest_dir, "%(id)s.%(ext)s"),
+            "--", url], timeout=timeout)
+        if rc == 0:
+            break
         kind, msg = _classify(err)
-        raise IngestError(kind, msg)
+        # Only what is plausibly transient. A private, deleted or age-gated video will
+        # refuse identically forever, and retrying it just makes the user wait longer to
+        # be told the same thing.
+        if kind not in ("blocked", "network") or attempt == len(_CLIENTS) - 1:
+            raise IngestError(kind, msg)
+        for f in os.listdir(dest_dir):      # a half-written part would confuse the next try
+            try:
+                os.remove(os.path.join(dest_dir, f))
+            except OSError:
+                pass
+        if on_retry:
+            on_retry(attempt + 1, msg)
+        # 3s, then 10s. The evidence points at rate limiting rather than a bad URL — the
+        # same client answered "no such format" and then served it a minute later, and a
+        # download that 403'd succeeded on the next attempt — so the pause has to be long
+        # enough to matter, while staying short enough that a user does not give up.
+        time.sleep(3 + 7 * attempt)
     wavs = [f for f in os.listdir(dest_dir) if f.endswith(".wav")]
     if not wavs:
         raise IngestError("unknown", "yt-dlp reported success but produced no audio "

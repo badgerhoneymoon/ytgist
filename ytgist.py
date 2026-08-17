@@ -439,7 +439,11 @@ def run(url, model_key="dense", refresh=False, progress=None,
             log("→ downloading audio only …")
             step("download", 15, f"{info['duration']/60:.0f} min of audio")
             with phase("download"):
-                wav = yt.fetch_audio(url, d)
+                wav = yt.fetch_audio(
+                    url, d,
+                    on_retry=lambda n, why: step(
+                        "download", 15,
+                        f"YouTube refused it — retrying ({n}/2)"))
             size = audio_mb = os.path.getsize(wav) / 1e6
             log(f"→ transcribing {size:.0f} MB of audio …")
             step("transcribe", 40, f"{size:.0f} MB on the GPU")
