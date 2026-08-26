@@ -380,6 +380,12 @@ def transcribe(wav_path):
 # ------------------------------------------------------------------------ main
 def run(url, model_key="dense", refresh=False, progress=None,
         native=False, regen=False, control=None):
+    # run.last is a FUNCTION ATTRIBUTE and survives between calls. Every early return that
+    # does not set it therefore leaves the PREVIOUS run's result sitting there for serve.py
+    # to pick up — and a video with no speech served the last video's summary, silently,
+    # with no error (Denis, 2026-08-10). Clearing it first makes a missing result missing.
+    run.last = None
+
     timings = {}                 # phase → seconds; the UI draws these as a stacked bar
     predicted = {}               # what we TOLD the user it would take, kept for scoring
 

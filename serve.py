@@ -604,6 +604,12 @@ class Handler(BaseHTTPRequestHandler):
                 sampler.stop()
                 _RUN.release()
             res = getattr(ytgist.run, "last", None)
+            # BELONGS TO THIS JOB, or it is not a result. Clearing run.last up front should
+            # make this impossible; checking anyway costs one comparison and the failure it
+            # guards against is serving one video's summary under another video's title.
+            if res and res.get("video_id") and res["video_id"] != ytgist.yt.video_id(
+                    req.get("url", "")):
+                res = None
             if not res:
                 q.put({"error": "No speech was found in that video."})
                 return
