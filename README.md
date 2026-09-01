@@ -32,16 +32,42 @@ the video's own language, kept side by side. And an ETA that learns from your ma
 | | |
 |---|---|
 | **Mac** | Apple Silicon (M1 or newer). Intel will not work — the model runs on Metal. |
-| **Memory** | **32 GB minimum**, 64 GB comfortable. The model alone holds ~21 GB. |
-| **Disk** | ~25 GB — 19 GB model, ~2 GB Python deps, plus transcripts. |
+| **Memory** | **64 GB for the 27B model.** See the note below — 32 GB is not enough for it. |
+| **Disk** | ~25 GB — 20 GB model, ~2 GB Python deps, plus transcripts. |
 | **macOS** | Anything recent. Developed on macOS 26. |
 
-If you have 16 GB, this will swap and crawl. Use a smaller GGUF — see
-[Using a different model](#using-a-different-model).
+### About the memory
+
+Measured while summarising, not estimated:
+
+| | |
+|---|---|
+| model resident | 21.3 GB |
+| KV cache + compute buffers (64k context) | 3.2 GB |
+| macOS + browser + the dev server | 8–10 GB |
+| **peak** | **≈ 33–35 GB** |
+
+So a 32 GB Mac will swap, and swapping a 20 GB model is worse than not running it. **64 GB
+is what this is tested on.**
+
+On 32 GB or less, use a smaller model — it is one environment variable, and an 8B is
+perfectly good at this task:
+
+```bash
+hf download unsloth/Qwen3.6-8B-GGUF Qwen3.6-8B-UD-Q5_K_XL.gguf --local-dir ~/models
+export YTGIST_MODEL=~/models/Qwen3.6-8B-UD-Q5_K_XL.gguf
+```
+
+See [Using a different model](#using-a-different-model).
 
 ---
 
 ## Install
+
+Four steps, start to finish. Homebrew must already be installed
+([brew.sh](https://brew.sh)).
+
+**1. Clone and run setup.**
 
 ```bash
 git clone https://github.com/badgerhoneymoon/ytgist.git
@@ -49,26 +75,48 @@ cd ytgist
 ./setup.sh
 ```
 
-`setup.sh` installs the command-line tools, builds a Python environment, installs the web
-dependencies, and tells you where to get the model. It is safe to re-run.
+This installs `yt-dlp`, `ffmpeg`, `llama.cpp`, `deno` and `node`, builds a Python
+environment with `mlx` and `parakeet-mlx`, and runs `npm install`. Ten minutes or so, mostly
+downloading. Safe to re-run.
 
-### The model, by hand
+It will finish by saying the model is **NOT FOUND** — that is expected, and step 2.
 
-`setup.sh` will not download 19 GB behind your back. Do it once:
+**2. Download the model** (~20 GB, once).
 
 ```bash
-mkdir -p ~/models && cd ~/models
-hf download unsloth/Qwen3.6-27B-GGUF Qwen3.6-27B-UD-Q5_K_XL.gguf --local-dir .
+pip install huggingface_hub          # for the `hf` command, if you don't have it
+mkdir -p ~/models
+hf download unsloth/Qwen3.6-27B-GGUF Qwen3.6-27B-UD-Q5_K_XL.gguf --local-dir ~/models
 ```
 
-(`hf` comes from `pip install huggingface_hub`. A browser download from the same repo works
-just as well.)
+Downloading the file from that page in a browser works just as well — put it in `~/models`.
 
-Already have a GGUF somewhere else? Point at it instead:
+Already have a GGUF elsewhere? Skip the download and point at it:
 
 ```bash
 export YTGIST_MODEL=/path/to/your-model.gguf
 ```
+
+(Put that line in your `~/.zshrc` if you want it to stick.)
+
+**3. Check it found everything.**
+
+```bash
+./setup.sh
+```
+
+Run it again. It should now print `found 20G at …` instead of NOT FOUND.
+
+**4. Start it.**
+
+```bash
+./ui
+```
+
+Then open **http://127.0.0.1:3210** and paste a YouTube link.
+
+The first summary is slower than the app predicts — it downloads the Parakeet speech model
+(~2.5 GB) the first time it transcribes anything.
 
 ---
 

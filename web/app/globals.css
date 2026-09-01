@@ -20,7 +20,7 @@
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* LIGHT ONLY (Denis: "fuck the dark mode"). color-scheme also stops the browser
+/* LIGHT ONLY, by choice. color-scheme also stops the browser
    auto-darkening form controls, which is what makes a light-only page look half-broken
    on a Mac set to dark. */
 html { color-scheme: light; }
