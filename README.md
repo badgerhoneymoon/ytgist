@@ -77,6 +77,11 @@ quality is identical — that is Parakeet, and it is the same model at every siz
 
 ---
 
+> **Handing this to an AI coding agent?** Point it at
+> **[AGENTS.md](AGENTS.md)** instead — same install, written as a checklist with a
+> verification after every step, plus the operating rules and failure modes that a person
+> picks up by feel and an agent has to be told.
+
 ## Install
 
 Four steps, start to finish. Homebrew must already be installed
