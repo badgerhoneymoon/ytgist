@@ -58,6 +58,12 @@ Measured on the 64 GB machine this was built on, for reference: model resident 2
 cache and compute buffers 3.2 GB at a 64k context, macOS and a browser another 8–10 — about
 33–35 GB at peak, which is why the 27B wants 64.
 
+Not sure what your Mac can take? **[canirun.ai](https://www.canirun.ai/)** detects your
+machine and ranks the open models that fit. One caveat when using it here: calculators like
+that size for the model weights plus a short chat context, while ytgist feeds it a whole
+transcript and needs the KV cache to match. **Treat their answer as the ceiling and go one
+size down** if you want long videos.
+
 **On 8 GB, download this instead of the 27B in step 2:**
 
 ```bash
