@@ -1,0 +1,15 @@
+#!/bin/bash
+# WHICH PYTHON RUNS THE ENGINE, resolved in one place instead of hardcoded in two.
+#
+# It needs mlx and parakeet-mlx, which are a couple of gigabytes, so the order below prefers
+# an environment that already has them over building a second one:
+#
+#   1. $YTGIST_PYTHON      — you said so explicitly; nothing argues with that
+#   2. ./.venv             — the venv setup.sh makes, the normal case for a fresh install
+#   3. ../dictate/.venv    — Myna's, which already carries mlx + parakeet-mlx on the
+#                            author's machine; sharing it avoids a duplicate 2.3GB download
+#   4. python3             — last resort, and it will only work if the deps are global
+for p in "$YTGIST_PYTHON" "$PWD/.venv/bin/python" "$PWD/../dictate/.venv/bin/python"; do
+  [ -n "$p" ] && [ -x "$p" ] && { echo "$p"; exit 0; }
+done
+command -v python3

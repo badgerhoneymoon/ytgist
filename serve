@@ -1,7 +1,10 @@
 #!/bin/bash
-# yt-dlp needs a JavaScript runtime for YouTube's player challenges, and an old
-# deno at ~/.deno/bin shadows brew's newer one on PATH — yt-dlp rejects the old
-# one and silently falls back to formats that 403 (2026-08-10).
-export PATH="/opt/homebrew/bin:$PATH"
-exec /Users/denisburkatskiy/Python/dictate/.venv/bin/python \
-     /Users/denisburkatskiy/Python/ytgist/serve.py "$@"
+# The engine: ingestion, transcription, the model, and the HTTP/SSE API on :8765.
+#
+# yt-dlp needs a JavaScript runtime for YouTube's player challenges, and on this machine an
+# old deno at ~/.deno/bin shadowed brew's newer one on PATH — yt-dlp rejects the old one and
+# silently falls back to formats that 403 (2026-08-10). Putting brew first is harmless
+# everywhere else.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+cd "$(dirname "$0")"
+exec "$(./python-path)" serve.py "$@"

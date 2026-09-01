@@ -26,7 +26,11 @@ import time
 import urllib.error
 import urllib.request
 
-MODEL = os.path.expanduser("~/models/Qwen3.6-27B-UD-Q5_K_XL.gguf")
+# WHERE THE MODEL IS. Overridable, because a second machine will not necessarily keep its
+# GGUFs in ~/models — and a hardcoded path is the thing that turns "clone and run" into an
+# afternoon (Denis is handing this to a friend, 2026-08-10).
+MODEL = os.path.expanduser(
+    os.environ.get("YTGIST_MODEL", "~/models/Qwen3.6-27B-UD-Q5_K_XL.gguf"))
 BORROW_PORT = 18081          # where we LOOK for an existing server
 # CONTEXT IS SIZED TO THE TRANSCRIPT, not fixed. A fixed 32k forced anything over ~50
 # minutes down the "summarise in halves" path, where each half is summarised blind to the

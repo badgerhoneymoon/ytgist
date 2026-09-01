@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs on Myna's venv, where mlx + parakeet-mlx already live — no second environment,
-# no duplicated 2.3GB of model deps. (Codex r1: a sibling dir cannot just import them.)
-exec /Users/denisburkatskiy/Python/dictate/.venv/bin/python \
-     /Users/denisburkatskiy/Python/ytgist/ytgist.py "$@"
+# The CLI. Same pipeline as the web UI, one video per invocation.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+cd "$(dirname "$0")"
+exec "$(./python-path)" ytgist.py "$@"

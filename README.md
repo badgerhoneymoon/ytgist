@@ -2,58 +2,141 @@
 
 Paste a YouTube link, get the argument — not a wall of text.
 
-Everything runs on this machine. Audio never leaves it, no API keys, no per-minute billing.
+Everything runs on your own machine. No API keys, no accounts, no per-minute billing, and
+the audio never leaves the laptop.
 
 ```
-YouTube link → yt-dlp (audio only) → Parakeet MLX → Qwen3.6 27B → numbered argument
+YouTube link → yt-dlp (audio only) → Parakeet MLX → Qwen3.6 27B → a numbered argument
 ```
 
-## What it produces
+---
+
+## What you get
 
 A numbered argument rather than a bullet list. Each step is a headline that **states the
 point** (not the topic), two to four short sentences that keep the reasoning, a timestamp
-that links back into the video, and the speaker's own words underneath so you can check
-the claim without watching.
+that links back into the video, and the speaker's own words underneath so you can check the
+claim without watching.
 
-Read only the bold headlines and you get the shape of the argument. Read the sentences and
-you get why each step follows.
+Read only the bold headlines and you have the shape of the argument. Read the sentences and
+you have why each step follows.
 
-## Running it
+Also: **more detail** on any step, on demand, from that step's own passage of the
+transcript. A library of everything you have ever summarised. Summaries in English *or* in
+the video's own language, kept side by side. And an ETA that learns from your machine.
 
-Needs `yt-dlp`, `llama-server` (llama.cpp), a Qwen3.6 27B GGUF in `~/models/`, and Node 20+.
+---
+
+## Requirements
+
+| | |
+|---|---|
+| **Mac** | Apple Silicon (M1 or newer). Intel will not work — the model runs on Metal. |
+| **Memory** | **32 GB minimum**, 64 GB comfortable. The model alone holds ~21 GB. |
+| **Disk** | ~25 GB — 19 GB model, ~2 GB Python deps, plus transcripts. |
+| **macOS** | Anything recent. Developed on macOS 26. |
+
+If you have 16 GB, this will swap and crawl. Use a smaller GGUF — see
+[Using a different model](#using-a-different-model).
+
+---
+
+## Install
 
 ```bash
-./serve                 # the engine on :8765 — ingestion, transcription, the model
-cd web && npm run dev   # the interface on :3210
+git clone https://github.com/badgerhoneymoon/ytgist.git
+cd ytgist
+./setup.sh
 ```
 
-Or `./make_app.sh` to build `ytgist.app`, which starts both and opens a chromeless window.
+`setup.sh` installs the command-line tools, builds a Python environment, installs the web
+dependencies, and tells you where to get the model. It is safe to re-run.
 
-CLI, if you prefer:
+### The model, by hand
+
+`setup.sh` will not download 19 GB behind your back. Do it once:
+
+```bash
+mkdir -p ~/models && cd ~/models
+hf download unsloth/Qwen3.6-27B-GGUF Qwen3.6-27B-UD-Q5_K_XL.gguf --local-dir .
+```
+
+(`hf` comes from `pip install huggingface_hub`. A browser download from the same repo works
+just as well.)
+
+Already have a GGUF somewhere else? Point at it instead:
+
+```bash
+export YTGIST_MODEL=/path/to/your-model.gguf
+```
+
+---
+
+## Run
+
+```bash
+./ui
+```
+
+That starts the engine on `:8765` and the interface on `:3210`, and prints both. Open
+**http://127.0.0.1:3210**.
+
+Prefer an app icon in the Dock?
+
+```bash
+./make_app.sh          # builds /Applications/ytgist.app
+open -a ytgist
+```
+
+It launches both halves and opens a chromeless window. Logs go to
+`~/Library/Logs/ytgist.log`.
+
+There is a CLI too:
 
 ```bash
 ./ytgist "https://youtube.com/watch?v=…"
 ./ytgist "https://youtube.com/watch?v=…" --native   # summary in the video's own language
 ```
 
+---
+
+## What it will do the first time
+
+The **first run downloads the Parakeet speech model** (~2.5 GB) from Hugging Face, so it is
+slower than the estimate says. After that, first-summary-of-the-session costs ~10s to load
+the 27B into memory; the server then stays warm for five minutes, so a second summary skips
+it entirely.
+
+Rough costs on an M4 Max, which the app measures and refines as you use it:
+
+| video | time |
+|---|---|
+| under 20 min | ~1 min |
+| about an hour | ~5 min |
+| 2 hours | ~9 min |
+| over 3.8 h | refused (see below) |
+
+---
+
 ## Things that are deliberate
 
 **The context is sized to the transcript.** 32k–128k on a ladder, with a q8_0 KV cache.
-Splitting a long transcript in halves and merging them loses whatever connected the two,
-so anything past ~3.8 hours is refused before the download rather than quietly downgraded.
+Splitting a long transcript in halves and merging them loses whatever connected the two, so
+anything past ~3.8 hours is refused *before* the download rather than quietly downgraded.
 
 **The ETA learns.** Every run records its real per-phase timings, video length, context
-size and power mode to `~/.ytgist/runs.jsonl`. The estimate is the median of matching runs.
-Predictions are stored beside outcomes, so whether it is improving is measurable rather
-than assumed — `python3 timing_log.py`.
+size, warm-or-cold and power mode to `~/.ytgist/runs.jsonl`. The estimate is a weighted fit
+over recent runs, and predictions are stored beside outcomes so whether it is improving is
+measurable rather than assumed:
 
-**Images resolve through Wikidata, which can refuse.** The model names the subject and its
-type (`Yabloko | political party`); Wikidata is an entity database, so it answers "no such
-thing" for `Apple party`. Free-text search cannot — Commons matched that string to a photo
-of Hallowe'en apple-bobbing, and Wikipedia's search offers "Apples to Apples". A step whose
-subject cannot be resolved exactly gets no picture.
+```bash
+$(./python-path) timing_log.py
+```
 
-**Quotes are shown as recognised.** Two repair passes were built and both were removed: a
+**Low Power Mode is ~2.4× slower.** It is detected and learned separately rather than
+averaged in.
+
+**Quotes are shown exactly as recognised.** Two repair passes were built and both removed: a
 full rewrite spent two minutes mostly adding commas, and a diff format "fixed" `Я не дан`
 into `Я не даю` when the truth was `недавно`. A plausible wrong quote is worse than an
 obviously garbled one.
@@ -65,17 +148,52 @@ started a 20 GB server and one's cleanup killed the other mid-generation.
 stale; the audio is deleted as soon as it has been read. Summaries are cached per language,
 so switching the toggle never destroys the other version.
 
+---
+
+## Using a different model
+
+Any GGUF llama.cpp can serve will work — the app only speaks to `llama-server` over HTTP.
+Smaller means faster and less accurate:
+
+```bash
+export YTGIST_MODEL=~/models/Qwen3.6-8B-UD-Q5_K_XL.gguf
+```
+
+If you change model family, check `gist_prompt.py` — the prompts are tuned for Qwen3.6, and
+the sampling parameters in `model_client.py` come from its model card.
+
+---
+
+## Troubleshooting
+
+**`HTTP 403` on download.** YouTube refuses transiently. The app already retries three
+times through different player clients. If it persists, `brew upgrade yt-dlp` and make sure
+a JS runtime is installed (`brew install deno`) — without one, yt-dlp falls back to formats
+that get refused.
+
+**"No speech was found in that video."** Exactly that — a music video or a silent build
+video has nothing to transcribe.
+
+**Nothing at `:3210`.** The dev server died. `cd web && npm run dev` and read the error.
+
+**The fan is loud.** Expected — the GPU is at 90 °C+ summarising. Install `macmon`
+(`brew install macmon`) and the progress bar shows the temperature live.
+
+**Everything is 2× slow.** Check Low Power Mode in System Settings → Battery.
+
+---
+
 ## Layout
 
 | file | what it owns |
 |---|---|
-| `youtube_ingest.py` | the only file that knows about yt-dlp; URL parsing, probing, audio |
+| `youtube_ingest.py` | the only file that knows about yt-dlp — URLs, probing, audio, retries |
 | `ytgist.py` | the pipeline, caching, timing, length limits |
-| `model_client.py` | llama-server lifecycle, adaptive context, orphan cleanup |
+| `model_client.py` | llama-server lifecycle, adaptive context, the warm pool |
 | `gist_prompt.py` | every prompt, and the timestamp verifier |
-| `entities.py` | Wikidata resolution for step images |
 | `timing_log.py` | the self-calibrating ETA |
+| `gpu.py` | temperature and load, via macmon and ioreg |
 | `serve.py` | HTTP + SSE for the web interface |
 | `web/` | Next.js interface |
 
-Built for one person's use. No telemetry, nothing phones home.
+Built for one person's use, then handed to a second. No telemetry, nothing phones home.
