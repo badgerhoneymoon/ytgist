@@ -32,33 +32,42 @@ the video's own language, kept side by side. And an ETA that learns from your ma
 | | |
 |---|---|
 | **Mac** | Apple Silicon (M1 or newer). Intel will not work — the model runs on Metal. |
-| **Memory** | **64 GB for the 27B model.** See the note below — 32 GB is not enough for it. |
+| **Memory** | Whatever you have — **pick the model to match**. 8 GB works. See below. |
 | **Disk** | ~25 GB — 20 GB model, ~2 GB Python deps, plus transcripts. |
 | **macOS** | Anything recent. Developed on macOS 26. |
 
-### About the memory
+### Pick the model for your RAM
 
-Measured while summarising, not estimated:
+**This matters more than anything else on the page.** Everything else is one download; this
+is the difference between the app working and your Mac swapping.
 
-| | |
-|---|---|
-| model resident | 21.3 GB |
-| KV cache + compute buffers (64k context) | 3.2 GB |
-| macOS + browser + the dev server | 8–10 GB |
-| **peak** | **≈ 33–35 GB** |
+| your Mac | model | download | what you get |
+|---|---|---|---|
+| **8 GB** | Qwen3.6 **1.7B** or **4B** Q4 | 1.1 / 2.5 GB | full 128k context, videos up to 3.8 h |
+| **16 GB** | Qwen3.6 **4B** or **8B** Q4 | 2.5 / 4.9 GB | same |
+| **32 GB** | Qwen3.6 **8B** or **14B** | 4.9 / 9 GB | same |
+| **64 GB** | Qwen3.6 **27B** Q5 | 20 GB | same, and the best summaries |
 
-So a 32 GB Mac will swap, and swapping a 20 GB model is worse than not running it. **64 GB
-is what this is tested on.**
+The app **measures your RAM and the model's size and sizes its own context accordingly** —
+a KV cache is proportional to both, so a 1.7B on an 8 GB Mac can afford a long context while
+a 27B on the same machine can afford none. Choose too large a model for the machine and it
+will not swap; it will refuse anything longer than a few minutes, which is the honest
+version of the same limit.
 
-On 32 GB or less, use a smaller model — it is one environment variable, and an 8B is
-perfectly good at this task:
+Measured on the 64 GB machine this was built on, for reference: model resident 21.3 GB, KV
+cache and compute buffers 3.2 GB at a 64k context, macOS and a browser another 8–10 — about
+33–35 GB at peak, which is why the 27B wants 64.
+
+**On 8 GB, download this instead of the 27B in step 2:**
 
 ```bash
-hf download unsloth/Qwen3.6-8B-GGUF Qwen3.6-8B-UD-Q5_K_XL.gguf --local-dir ~/models
-export YTGIST_MODEL=~/models/Qwen3.6-8B-UD-Q5_K_XL.gguf
+hf download unsloth/Qwen3.6-4B-GGUF Qwen3.6-4B-UD-Q4_K_XL.gguf --local-dir ~/models
+export YTGIST_MODEL=~/models/Qwen3.6-4B-UD-Q4_K_XL.gguf
 ```
 
-See [Using a different model](#using-a-different-model).
+Being straight about the trade: a 4B writes shorter, blunter takeaways than the 27B and is
+more likely to fumble a timestamp. The structure holds; the prose is plainer. Transcription
+quality is identical — that is Parakeet, and it is the same model at every size.
 
 ---
 

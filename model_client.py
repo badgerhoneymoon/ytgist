@@ -38,8 +38,45 @@ BORROW_PORT = 18081          # where we LOOK for an existing server
 # raise the context window"). But a fixed 128k would make a 5-minute video pay for a KV
 # cache it never touches, so the size follows the input.
 CTX = 32768                  # floor — below this the ladder buys nothing
-CTX_MAX = 131072             # ceiling — ~4 hours of speech
-_CTX_LADDER = (32768, 49152, 65536, 98304, 131072)
+_CTX_LADDER = (8192, 16384, 32768, 49152, 65536, 98304, 131072)
+
+
+def _total_ram_gb() -> float:
+    try:
+        return int(subprocess.run(["sysctl", "-n", "hw.memsize"],
+                                  capture_output=True, text=True, timeout=3).stdout) / 1e9
+    except Exception:
+        return 64.0          # assume the machine this was built on rather than cripple it
+
+
+_RAM_GB = _total_ram_gb()
+_OVERHEAD_GB = 4.0           # macOS, a browser, the dev server — measured, not guessed
+# Calibrated against this machine: a 20GB model at a 64k context measured 3.2GB of KV and
+# compute buffers, which is 0.08 GB per GB of model per 32k of context.
+_KV_GB_PER_GB_PER_32K = 0.08
+
+
+def ctx_ceiling(model: str = None) -> int:
+    """The largest context this machine can hold for THIS model.
+
+    RAM alone is the wrong question. A KV cache is proportional to the model as well as to
+    the context, so an 8GB Mac running a 1.1GB model can afford a long context while the
+    same machine attempting a 20GB one cannot afford any — and capping purely by RAM would
+    punish the small model for the big one's appetite (Denis's friend has 8GB, 2026-08-10).
+    """
+    try:
+        model_gb = os.path.getsize(model or MODEL) / 1e9
+    except OSError:
+        model_gb = 20.0                      # unknown: assume the big one and be careful
+    budget = _RAM_GB - model_gb - _OVERHEAD_GB
+    if budget <= 0.2:
+        return _CTX_LADDER[0]                # it will swap regardless; keep it survivable
+    per_32k = model_gb * _KV_GB_PER_GB_PER_32K
+    best = _CTX_LADDER[0]
+    for rung in _CTX_LADDER:
+        if per_32k * (rung / 32768) <= budget * 0.6:   # leave headroom for compute buffers
+            best = rung
+    return best
 
 
 def ctx_for(need_tokens: int) -> int:
@@ -47,7 +84,8 @@ def ctx_for(need_tokens: int) -> int:
     if not need_tokens:
         return CTX
     want = need_tokens + 2048
-    return next((c for c in _CTX_LADDER if want <= c), CTX_MAX)
+    ceiling = ctx_ceiling()
+    return next((c for c in _CTX_LADDER if want <= c <= ceiling), ceiling)
 HTTP_TIMEOUT = 20            # every request is bounded — a hung server must not hang us
 # https://huggingface.co/Qwen/Qwen3.6-27B — "Best Practices", instruct/non-thinking row.
 QWEN_SAMPLING = {"top_p": 0.80, "top_k": 20, "min_p": 0.0,
@@ -94,7 +132,14 @@ ALIAS = "ytgist-owned"          # the marker that makes orphan cleanup safe
 # The risk this reintroduces is the one we spent the morning fixing: a 20GB process nobody
 # owns. So the pool holds at most ONE server, a daemon reaper stops it after IDLE seconds,
 # and it is registered with atexit — an engine restart never leaves it behind.
-IDLE = 300                   # seconds a released server stays warm
+# HOW LONG A FINISHED SERVER STAYS PARKED. Five minutes is free on a 64GB machine and
+# hostile on an 8GB one, where those gigabytes are the difference between the browser being
+# responsive and the machine swapping. Small memory, short parking.
+IDLE = 300 if _RAM_GB >= 24 else 45
+
+
+def _ctx_max():
+    return ctx_ceiling()
 
 _warm = {"srv": None, "until": 0.0}
 _warm_lock = threading.Lock()

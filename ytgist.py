@@ -60,7 +60,7 @@ LOAD_BASE, LOAD_PER_MIN = 4.0, 0.14
 
 def max_minutes() -> float:
     """Longest video that fits the biggest context we will start, in one pass."""
-    room = model_client.CTX_MAX - 2048 - 1400          # answer + prompt overhead
+    room = model_client.ctx_ceiling() - 2048 - 1400    # answer + prompt overhead
     return room * CHARS_PER_TOKEN / CHARS_PER_SEC / 60
 
 
