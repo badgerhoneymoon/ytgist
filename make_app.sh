@@ -35,6 +35,11 @@ REPO="$REPO"
 LAUNCH
 cat >> "$APP/Contents/MacOS/ytgist" <<'LAUNCH'
 LOG="$HOME/Library/Logs/ytgist.log"
+# A GUI app launched from Finder inherits a MINIMAL PATH — /usr/bin:/bin and little else.
+# Homebrew is not on it, so npm, node, yt-dlp and llama-server are all invisible, and the
+# launcher failed with "npm: command not found" while Finder showed only "ytgist is not
+# responding" (2026-09-12). The shell you test in has a login PATH and hides this entirely.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node" 2>/dev/null | tail -1)/bin:$PATH"
 exec >>"$LOG" 2>&1
 echo "--- launch $(date) ---"
 
