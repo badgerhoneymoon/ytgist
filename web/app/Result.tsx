@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, Loader2, RefreshCw, RotateCcw } from "lucide-react";
+import { Check, ChevronDown, Copy, Loader2, RefreshCw, RotateCcw } from "lucide-react";
 import type { Gist, Takeaway } from "./types";
 import Cited from "./Cited";
 import { parseCited } from "./parse";
@@ -33,6 +33,11 @@ export default function Result({
 }) {
   const total = Object.values(gist.timings).reduce((a, b) => a + b, 0);
 
+  // Detail expanded in THIS session lives inside each Step. Copying from `gist` alone
+  // would silently drop a passage he had just pulled up — so expansions are reported
+  // back here, and the clipboard carries what is actually on screen.
+  const [expanded, setExpanded] = useState<Record<number, string>>({});
+
   return (
     <article className="mt-13" style={{ animation: "rise .5s var(--ease-out-expo)" }}>
       <h2 className="col-start-2 text-[33px] font-semibold leading-[1.14] tracking-[-0.02em]">
@@ -54,6 +59,7 @@ export default function Result({
             t={t}
             videoId={gist.videoId}
             native={native}
+            onExpanded={(text) => setExpanded((e) => ({ ...e, [i]: text }))}
             // The step's span is from its own timestamp to the NEXT one — the argument's
             // own structure decides the window, not a guess about how much to read.
             until={gist.takeaways[i + 1]?.seconds ?? null}
@@ -127,6 +133,7 @@ export default function Result({
             smear (Denis: "very pale and faceless"). The icon carries the verb, so the
             label can stay short and the two actions stop looking interchangeable. */}
         <div className="mt-6 flex flex-wrap gap-2">
+          <CopyButton markdown={() => toMarkdown(gist, expanded)} />
           <button
             onClick={onRegenerate}
             title="new summary from the transcript already on disk"
@@ -152,6 +159,81 @@ export default function Result({
         </div>
       </footer>
     </article>
+  );
+}
+
+/** THE WHOLE SUMMARY AS MARKDOWN — what you would want in your notes, not what the
+ *  screen happens to contain.
+ *
+ *  Timestamps become real links, because a pasted "12:34" is dead text somewhere else and
+ *  the link back into the video is half of why the summary is trustworthy. Evidence stays
+ *  a blockquote and expanded detail is marked as such, so the model's claim and the
+ *  speaker's own words never merge into one undifferentiated paragraph after a paste.
+ */
+function toMarkdown(gist: Gist, expanded: Record<number, string>): string {
+  const out: string[] = [`# ${gist.title}`];
+  if (gist.videoId) out.push(`https://youtu.be/${gist.videoId}`);
+  if (gist.tldr) out.push(`**${gist.tldr}**`);
+
+  gist.takeaways.forEach((t, i) => {
+    const link =
+      t.stamp && t.seconds !== null
+        ? ` — [${t.stamp}](https://youtu.be/${gist.videoId}?t=${t.seconds})`
+        : "";
+    out.push(`## ${i + 1}. ${t.headline}${link}`);
+    if (t.body) out.push(t.body);
+    if (t.evidence) out.push(quote(t.evidence));
+    // "" is asked-and-nothing — a real answer on screen, but nothing to paste.
+    const more = expanded[i] ?? t.expansion;
+    if (more) out.push(`*More detail:* ${more}`);
+  });
+
+  return out.join("\n\n") + "\n";
+}
+
+/** A multi-line quote needs the marker on EVERY line or the paste collapses into prose. */
+function quote(s: string): string {
+  return s
+    .trim()
+    .split("\n")
+    .map((l) => `> ${l}`)
+    .join("\n");
+}
+
+/** Copy, and SAY SO. A clipboard write is invisible — without the state change you press
+ *  it twice and still do not know whether it worked. The failure has to be visible for the
+ *  same reason: a browser can refuse the clipboard, and a button that silently does
+ *  nothing is worse than one that admits it.
+ */
+function CopyButton({ markdown }: { markdown: () => string }) {
+  const [state, setState] = useState<"idle" | "done" | "failed">("idle");
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(markdown());
+      setState("done");
+    } catch {
+      setState("failed");
+    }
+    setTimeout(() => setState("idle"), 2000);
+  };
+
+  return (
+    <button
+      onClick={copy}
+      title="the whole summary as Markdown — timestamps as links, quotes intact"
+      className="group flex items-center gap-2 rounded-lg border border-line px-3.5 py-2
+                 text-[13px] font-medium text-ink transition-colors duration-150
+                 hover:border-accent hover:bg-accent/[0.06] hover:text-accent
+                 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+    >
+      {state === "done" ? (
+        <Check size={14} strokeWidth={2.5} className="text-accent" />
+      ) : (
+        <Copy size={14} strokeWidth={2} className="text-soft group-hover:text-accent" />
+      )}
+      {state === "done" ? "Copied" : state === "failed" ? "Couldn't copy" : "Copy text"}
+    </button>
   );
 }
 
@@ -184,12 +266,14 @@ function Step({
   videoId,
   native,
   until,
+  onExpanded,
 }: {
   n: number;
   t: Takeaway;
   videoId: string;
   native: boolean;
   until: number | null;
+  onExpanded: (text: string) => void;
 }) {
   // OPEN BY DEFAULT (Denis, 2026-08-08). The evidence is the reason to trust the claim;
   // hiding it behind a click made the summary something you take on faith, which is the
@@ -216,7 +300,9 @@ function Step({
         }),
       });
       const d = await r.json();
-      setMore(d.error ? `` : (d.text ?? ""));
+      const text = d.error ? `` : (d.text ?? "");
+      setMore(text);
+      onExpanded(text);
     } catch {
       setMore("");
     } finally {
