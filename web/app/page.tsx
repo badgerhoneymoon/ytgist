@@ -53,6 +53,9 @@ export default function Home() {
   const videoId = parseYouTube(url);
   const badLink = url.trim().length > 0 && !videoId;
   const esRef = useRef<EventSource | null>(null);
+  // Which kind of job the stream is carrying. A ref, not state: the SSE handler is created
+  // once and would otherwise read whatever this was when it was built.
+  const shotJobRef = useRef(false);
   const jobRef = useRef<string>("");
 
   const cancel = useCallback(() => {
@@ -88,6 +91,10 @@ export default function Home() {
   // Russian, and the evidence quotes stay verbatim either way. On, for when the wording
   // itself is the point.
   const [native, setNative] = useState(false);
+  // Screenshots as part of the RUN, chosen before it starts. The pass itself is the same
+  // one the button under a finished summary triggers; this only decides whether the run
+  // goes on to do it without being asked again.
+  const [shots, setShots] = useState(false);
   const [eta, setEta] = useState<Record<string, number> | null>(null);
   const [phaseAgo, setPhaseAgo] = useState(0);
   const [gpuSeries, setGpuSeries] = useState<GpuSample[]>([]);
@@ -169,8 +176,13 @@ export default function Home() {
       const f: Frame = JSON.parse(ev.data);
       // ONE HANDLER FOR BOTH KINDS OF JOB. A second EventSource handler is what once left
       // the machine readout invisible on fresh runs; the difference between a summary and
-      // a screenshot pass belongs in two lines here, not in two subscriptions.
-      if (f.stage === "frames") {
+      // a screenshot pass belongs in a few lines here, not in two subscriptions.
+      //
+      // The same "frames" stage arrives from both, and WHO ASKED decides where it shows:
+      // a pass the result's own button started reports inside the result, while a run that
+      // was told to look for screenshots reports in the progress bar, where the rest of
+      // that run's phases are.
+      if (f.stage === "frames" && shotJobRef.current) {
         setShotMsg(f.msg ?? "");
         return;
       }
@@ -186,15 +198,16 @@ export default function Home() {
         );
         setShotBusy(false);
         setShotMsg("");
+        shotJobRef.current = false;
         done();
         return;
       }
       if (f.error || f.stopped) {
-        // Cleared unconditionally: reading shotBusy here would read whatever it was when
-        // this callback was created, and clearing it when it is already false costs
-        // nothing.
+        // Cleared unconditionally: clearing what is already clear costs nothing, and the
+        // alternative is reading state this callback closed over long ago.
         setShotBusy(false);
         setShotMsg("");
+        shotJobRef.current = false;
       }
       if (f.pct !== undefined) setPct(f.pct);
       if (f.stage) setStage(f.stage === "cached" ? "summarise" : f.stage);
@@ -254,6 +267,7 @@ export default function Home() {
   const findShots = useCallback(async () => {
     if (!gist || busy || shotBusy) return;
     setShotBusy(true);
+    shotJobRef.current = true;
     setShotMsg("starting");
     setError("");
     try {
@@ -271,6 +285,7 @@ export default function Home() {
       attach(job, `https://www.youtube.com/watch?v=${gist.videoId}`);
     } catch {
       setShotBusy(false);
+      shotJobRef.current = false;
       setShotMsg("");
       setError("Couldn't start the screenshot search — is the engine running?");
     }
@@ -299,6 +314,7 @@ export default function Home() {
         body: JSON.stringify({
           url: target,
           native: nativeOverride ?? native,
+          shots,
           regen: mode === "regen",       // new summary, transcript reused
           refresh: mode === "refresh",   // download and transcribe again too
         }),
@@ -306,7 +322,7 @@ export default function Home() {
       const { job } = await res.json();
       attach(job, target);
     },
-    [url, busy, native, attach]
+    [url, busy, native, shots, attach]
   );
 
   return (
@@ -388,6 +404,35 @@ export default function Home() {
           </span>
           <span className="transition-colors duration-150 group-hover:text-ink">
             Keep the takeaways in the video&rsquo;s own language
+          </span>
+        </label>
+
+        {/* SCREENSHOTS, DECIDED UP FRONT. The button under a finished summary stays — it is
+            how an already-transcribed video gets pictures — but choosing before the run is
+            how you avoid coming back to press it (Denis, 2026-10-02). */}
+        <label className="group flex w-full cursor-pointer select-none items-center gap-2.5
+                          text-[13.5px] text-soft">
+          <input
+            type="checkbox"
+            checked={shots}
+            onChange={(e) => setShots(e.target.checked)}
+            className="peer sr-only"
+          />
+          <span
+            className="relative h-[18px] w-[30px] shrink-0 rounded-full bg-line transition-colors
+                       duration-200 peer-checked:bg-accent
+                       peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2
+                       peer-focus-visible:outline-accent"
+          >
+            <span
+              className="absolute left-[2px] top-[2px] h-[14px] w-[14px] rounded-full bg-canvas
+                         shadow-sm transition-transform duration-200 peer-checked:translate-x-3
+                         group-has-[:checked]:translate-x-3"
+              style={{ transitionTimingFunction: "var(--ease-out-expo)" }}
+            />
+          </span>
+          <span className="transition-colors duration-150 group-hover:text-ink">
+            Look for a screenshot for each takeaway
           </span>
         </label>
 

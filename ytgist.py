@@ -74,7 +74,16 @@ def _refuse_if_too_long(minutes: float):
         )
 
 
-def estimate(minutes: float, cached: bool) -> dict:
+def frames_cost(takeaways: int = 12) -> float:
+    """What a screenshot pass costs, from the passes this machine has actually run.
+
+    A model load, then a sheet read per takeaway, then a short download for each moment
+    that was picked — so it scales with takeaways rather than with video length, and the
+    log is the only honest source for the per-takeaway rate."""
+    return timing_log.frames_rate() * max(takeaways, 1)
+
+
+def estimate(minutes: float, cached: bool, shots: bool = False) -> dict:
     """Seconds per remaining phase for a video of this length.
 
     Built-in rates are the FLOOR, not the answer: whatever the timing log has measured on
@@ -112,14 +121,18 @@ def estimate(minutes: float, cached: bool) -> dict:
     if isinstance(load, tuple):
         load = load[0] + load[1] * minutes
 
+    # steps_for says "10-13"; the top of its own range is the honest guess for how many
+    # takeaways there will be to look at, and keeps one source of truth for the count.
+    expected_steps = int(gist_prompt.steps_for(minutes).split("-")[-1])
+    extra = {"frames": frames_cost(expected_steps)} if shots else {}
     if cached:
         return {"model load": load,
-                "summarise": summarise_cost() or cost("summarise")}
+                "summarise": summarise_cost() or cost("summarise"), **extra}
     return {"read info": 2.0,
             "download": download_cost() or cost("download"),
             "transcribe": cost("transcribe"),
             "model load": load,
-            "summarise": summarise_cost() or cost("summarise")}
+            "summarise": summarise_cost() or cost("summarise"), **extra}
 
 
 EXPAND_MAX = 8 * 60         # a step's span, capped — beyond this it stops being one point
@@ -215,6 +228,38 @@ def frame_file(vid, secs):
     return os.path.join(FRAMES, vid, f"{int(round(secs))}.jpg")
 
 
+def _look_wider(srv, url, vid, frags, skip, headline, cells, cols, rows, per_sheet,
+                budget=4):
+    """Search the REST of the video for a frame that shows what this claim is about.
+
+    Spread across the whole thing rather than scanning outwards from the takeaway: an
+    illustration that lives five minutes away is no less useful than one two sheets away,
+    and `budget` sheets evenly spaced cover a long video as fairly as a short one. Returns
+    (sheet index, cell, what it saw).
+    """
+    import frame_picker
+    if len(frags) < 2:
+        return skip, None, ""
+    order = [round(i * (len(frags) - 1) / max(budget - 1, 1)) for i in range(budget)]
+    seen = set()
+    for n in order:
+        if n == skip or n in seen:
+            continue
+        seen.add(n)
+        sheet = os.path.join(SHEETS, vid, f"{n:03d}.jpg")
+        try:
+            if not os.path.exists(sheet):
+                yt.sheet_jpeg(frags[n]["url"], sheet)
+            spans = f"{gist_prompt.stamp(n * per_sheet)}-{gist_prompt.stamp((n + 1) * per_sheet)}"
+            cell, saw = frame_picker.ask(
+                srv, sheet, frame_picker.question_wide(cells, headline, [spans]), cells)
+        except (IngestError, OSError):
+            continue
+        if cell is not None and cell >= 0:
+            return n, cell, saw
+    return skip, None, ""
+
+
 def find_frames(url, vid, native=False, progress=None, control=None):
     """Look for a screenshot worth showing beside each takeaway.
 
@@ -270,9 +315,18 @@ def find_frames(url, vid, native=False, progress=None, control=None):
                     yt.sheet_jpeg(frags[n]["url"], sheet)
                 cell, saw = frame_picker.pick(srv, sheet, headline, cells, per_tile,
                                               n * per_sheet)
-                if cell is None:
+                if cell is None or cell < 0:
+                    # ELSEWHERE IN THE VIDEO. A claim made at 00:40 is often shown at
+                    # 04:10 — the speaker says what the hand does and the demonstration
+                    # comes later (Denis, 2026-10-02) — so a takeaway with nothing on its
+                    # own sheet gets the rest of the video offered to it, a few sheets at
+                    # a time, before being told there is nothing.
+                    n, cell, saw = _look_wider(srv, url, vid, frags, n, headline, cells,
+                                               cols, rows, per_sheet)
+                if cell is None or cell < 0:
                     decisions.append({"state": "none"})
                     continue
+                sheet = os.path.join(SHEETS, vid, f"{n:03d}.jpg")
                 at = n * per_sheet + cell * per_tile
                 dest = frame_file(vid, at)
                 if os.path.exists(dest):
@@ -284,9 +338,14 @@ def find_frames(url, vid, native=False, progress=None, control=None):
                 # Neighbours either side, out of ONE download: the tile's second is derived
                 # from duration/frame_count rather than read, so the asked-for moment may
                 # simply be the wrong one, and a second download would cost as much again.
+                # NINE CANDIDATES FROM ONE DOWNLOAD. The download is the expensive part;
+                # pulling extra frames out of the clip costs a few hundred milliseconds
+                # each. A quarter-tile sweep either side covers the drift in a derived
+                # timestamp and lands inside a shot even when the video cuts every few
+                # seconds.
+                sweep = tuple(round(per_tile * k / 4, 2) for k in range(-4, 5))
                 cands = yt.frames_around(url, at, os.path.join(TMP, f"fr-{vid}-{int(at)}"),
-                                         offsets=(0.0, -per_tile, per_tile),
-                                         margin=min(per_tile, 6.0))
+                                         offsets=sweep, margin=4.0)
                 best, ok = (frame_picker.best_match(cands, tile) if tile
                             else (cands.get(0.0) or next(iter(cands.values())), True))
                 if best and ok:
@@ -513,8 +572,30 @@ def transcribe(wav_path):
 
 
 # ------------------------------------------------------------------------ main
+def _shots_into(result, url, vid, native, progress, control):
+    """Run the screenshot pass and fold it into a result that is ALREADY COMPLETE.
+
+    Everything in here is best-effort by construction: the summary is saved, run.last is
+    set, and the user has what they asked for. A video with no storyboard, a machine
+    without the memory, a refused download — each costs its own picture and nothing else.
+    Cancelling is the exception, because that is the user's own instruction and the run
+    should end when they say so.
+    """
+    if not isinstance(result, dict):
+        return
+    try:
+        decisions, outcome = find_frames(url, vid, native=native, progress=progress,
+                                         control=control)
+        result["frames"], result["frames_outcome"] = decisions, outcome
+    except Cancelled:
+        raise
+    except (IngestError, model_client.ModelError, OSError) as e:
+        result["frames"], result["frames_outcome"] = [], f"couldn't look: {e}"
+        log(f"  screenshots: {e}")
+
+
 def run(url, model_key="dense", refresh=False, progress=None,
-        native=False, regen=False, control=None):
+        native=False, regen=False, control=None, shots=False):
     # run.last is a FUNCTION ATTRIBUTE and survives between calls. Every early return that
     # does not set it therefore leaves the PREVIOUS run's result sitting there for serve.py
     # to pick up — and a video with no speech served the last video's summary, silently,
@@ -558,7 +639,7 @@ def run(url, model_key="dense", refresh=False, progress=None,
         log(f"→ cached transcript for {vid} ({len(cached['sentences'])} segments)")
         step("cached", 70, f"cached transcript, {len(cached['sentences'])} segments")
         _refuse_if_too_long(cached.get("duration", 0) / 60)
-        predicted = estimate(cached.get("duration", 0) / 60, True)
+        predicted = estimate(cached.get("duration", 0) / 60, True, shots)
         if progress:
             progress({"eta": predicted,
                       "video_minutes": round(cached.get("duration", 0) / 60)})
@@ -572,7 +653,7 @@ def run(url, model_key="dense", refresh=False, progress=None,
         mins = info["duration"] / 60
         log(f"   {gist_prompt.sanitize(info['title'])}  ({mins:.0f} min)")
         _refuse_if_too_long(mins)
-        predicted = estimate(mins, False)
+        predicted = estimate(mins, False, shots)
         if progress:
             progress({"eta": predicted, "video_minutes": round(mins)})
         d = yt.temp_dir(TMP)
@@ -608,7 +689,8 @@ def run(url, model_key="dense", refresh=False, progress=None,
 
     saved = None if (refresh or regen) else load_summary(vid, native)
     if saved:
-        step("done", 100, "")
+        if not shots:
+            step("done", 100, "")
         log("  using the saved summary (regenerate to make a new one)")
         run.last = {"title": meta.get("title", ""), "markdown": saved["text"],
                     "raw": saved["text"], "dropped": 0, "video_id": vid,
@@ -621,6 +703,12 @@ def run(url, model_key="dense", refresh=False, progress=None,
                                if saved.get("frames_v") == FRAMES_V else []),
                     "frames_outcome": (saved.get("frames_outcome") or ""
                                        if saved.get("frames_v") == FRAMES_V else "")}
+        # Asked for screenshots on a summary that already exists and has never been
+        # searched: do it now rather than making them press the button they just ticked.
+        if shots:
+            if not run.last["frames"]:
+                _shots_into(run.last, url, vid, native, progress, control)
+            step("done", 100, "")
         return 0
 
     transcript = gist_prompt.format_transcript(sentences)
@@ -666,7 +754,10 @@ def run(url, model_key="dense", refresh=False, progress=None,
                     raise Cancelled()
                 raise
 
-    step("done", 100, "")
+    # NOT DONE YET IF SCREENSHOTS ARE STILL TO COME. Saying "done" and then working on
+    # for two more minutes is the bar lying about the run it is drawing.
+    if not shots:
+        step("done", 100, "")
 
     was_cached = bool(timings.pop("_cached", False))   # popped BEFORE any consumer
     text, dropped = gist_prompt.verify(out, sentences, vid)
@@ -688,6 +779,13 @@ def run(url, model_key="dense", refresh=False, progress=None,
                 "expansions": {}, "frames": [], "frames_outcome": ""}
     timing_log.record(meta.get("duration", 0) / 60, was_cached, srv_ctx, timings, native,
                       predicted=predicted, warm=srv_warm, audio_mb=audio_mb)
+    # THE SUMMARY IS ALREADY SAVED AND run.last ALREADY SET before this runs. A screenshot
+    # pass that fails — no storyboard, no memory, a refused download — must cost the
+    # summary nothing, so it can only ADD to a result that is complete without it.
+    if shots:
+        with phase("frames"):
+            _shots_into(run.last, url, vid, native, progress, control)
+        step("done", 100, "")
     total = sum(timings.values())
     log("\n  " + " · ".join(f"{k} {v:g}s" for k, v in timings.items())
         + f"  =  {total:.0f}s total")

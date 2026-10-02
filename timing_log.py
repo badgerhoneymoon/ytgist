@@ -113,6 +113,23 @@ def record_frames(takeaways: int, picked: int, secs: float):
         pass
 
 
+def frames_rate(default: float = 7.0) -> float:
+    """Seconds per takeaway for a screenshot pass, measured on this machine.
+
+    The model load is in there too — it is paid once per pass and there is no honest way
+    to separate it from a handful of rows — so this over-estimates short passes slightly
+    and that is the right direction for an ETA."""
+    try:
+        rows = [json.loads(l) for l in open(FRAMES, encoding="utf-8") if l.strip()]
+        rows = [r for r in rows if r.get("takeaways") and r.get("secs")]
+        if not rows:
+            return default
+        rows = rows[-12:]
+        return sum(r["secs"] / r["takeaways"] for r in rows) / len(rows)
+    except (OSError, ValueError):
+        return default
+
+
 def record_expand(minutes: float, chars: int, warm: bool, secs: float, native: bool = False):
     """One "more detail" click. Kept in its OWN file, not runs.jsonl.
 

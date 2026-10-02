@@ -26,7 +26,8 @@ this into one question.
 import os
 import re
 
-TILE_RE = re.compile(r"^(?:cell\s*)?(\d{1,2})\.?$", re.I)
+TILE_RE = re.compile(r"^\**(?:cell\s*)?(\d{1,2})\**[.:]?$", re.I)
+NONE_RE = re.compile(r"^\**none\**[.!]?$", re.I)
 
 
 def question(cells: int, per_tile: float, first_secs: float, headline: str) -> str:
@@ -34,30 +35,71 @@ def question(cells: int, per_tile: float, first_secs: float, headline: str) -> s
     return (
         f"A {cells}-cell grid of video thumbnails, numbered 1-{cells} left to right, top to "
         f"bottom, about {per_tile:.0f} seconds apart starting at {span}.\n\n"
-        "First: what kind of thing fills most of each cell? Judge the KIND — slide, chart, "
-        "diagram, code editor, terminal, screen share, demo, or a person talking — not "
-        "whether its text is legible, since a tile is only 320x180.\n\n"
-        f"Then, given the claim \"{headline}\", name the single best cell to show beside it, "
-        "or NONE if every cell is only a person or a room. A picture of someone's face adds "
-        "nothing to a written argument.\n\n"
+        "First: what is actually visible in each cell? Say the SUBJECT — the object, "
+        "machine, device, screen, slide, diagram, chart, code, experiment, place or "
+        "demonstration — not whether its text is legible, since a tile is only 320x180.\n\n"
+        f"Then, given the claim \"{headline}\", name the single cell that best SHOWS WHAT "
+        "THE CLAIM IS ABOUT: the thing itself, being used, demonstrated, measured or drawn. "
+        "Prefer a close view of the subject over a wide shot, and the subject over anyone "
+        "describing it.\n\n"
+        "Answer NONE only if every cell is a person talking, a logo or a title card with "
+        "none of the subject visible. A portrait of a speaker adds nothing to a written "
+        "argument — but the thing they are talking about does.\n\n"
         "Reply with one line of what you see, then a final line that is the cell number "
         "alone, or the single word NONE."
     )
 
 
 def verdict(answer: str, cells: int):
-    """(cell_index_or_None, what_it_said). The decision is the LAST line; the first line is
-    what it saw, which is worth keeping for the log when a pick looks wrong."""
+    """(cell, what_it_said) — cell is an index, None for "nothing here", or -1 for "it
+    never got as far as deciding".
+
+    THREE OUTCOMES, because the third one was silently wearing the second one's clothes.
+    The decision is the last line, but a describe-then-decide answer that runs out of
+    tokens ends mid-description, and reading that as NONE turned a truncated reply into a
+    confident "there is nothing in this video" — which is how a film full of robot hands
+    reported two screenshots out of seven (Denis, 2026-10-02).
+    """
     lines = [l.strip() for l in answer.splitlines() if l.strip()]
     if not lines:
-        return None, ""
-    m = TILE_RE.match(lines[-1])
-    if not m:
-        return None, lines[0][:120]
-    n = int(m.group(1))
-    if not 1 <= n <= cells:
-        return None, lines[0][:120]
-    return n - 1, lines[0][:120]
+        return -1, ""
+    saw = lines[0][:120]
+    for line in reversed(lines):
+        if NONE_RE.match(line):
+            return None, saw
+        m = TILE_RE.match(line)
+        if m:
+            n = int(m.group(1))
+            if 1 <= n <= cells:
+                return n - 1, saw
+            break
+    return -1, saw          # it described cells and never reached a verdict
+
+
+def question_wide(cells: int, headline: str, spans: list) -> str:
+    """The same question, asked of a sheet from ELSEWHERE in the video.
+
+    A claim made at 00:40 is often illustrated at 04:10 — the speaker says what the hand
+    can do, and the demonstration comes later (Denis, 2026-10-02). So when the moment's own
+    sheet has nothing, the rest of the video is still worth asking about; the only thing
+    that changes is that the timestamps are no longer "around here", so the answer must be
+    judged on the subject alone.
+    """
+    where = ", ".join(spans)
+    return (
+        f"A {cells}-cell grid of video thumbnails from elsewhere in the same video "
+        f"({where}), numbered 1-{cells} left to right, top to bottom.\n\n"
+        "First: what is actually visible in each cell? Say the SUBJECT — the object, "
+        "machine, device, screen, slide, diagram, chart, code, experiment, place or "
+        "demonstration.\n\n"
+        f"Then, given the claim \"{headline}\", name the single cell that SHOWS WHAT THE "
+        "CLAIM IS ABOUT — the thing itself, being used, demonstrated, measured or drawn.\n\n"
+        "These frames are from a different moment than the claim, so only answer with a "
+        "cell if it genuinely shows that subject. Answer NONE if none of them do, or if "
+        "they are only people talking, logos or title cards.\n\n"
+        "Reply with one line of what you see, then a final line that is the cell number "
+        "alone, or the single word NONE."
+    )
 
 
 # ----------------------------------------------------------------- does it match?
@@ -70,7 +112,12 @@ def verdict(answer: str, cells: int):
 # The comparison is a 16x9 greyscale signature and a mean absolute difference — no model
 # call, no dependency. It is deliberately loose: the same shot re-encoded at 720p against a
 # 320x180 tile differs everywhere in detail and nowhere in layout.
-MATCH_TOLERANCE = 46          # 0-255 per cell; a different scene scores far above this
+# 0-255 per cell. A frame from a DIFFERENT part of the video scores far above this; the
+# same scene a few seconds off scores in the forties, because a 320x180 thumbnail and a
+# 720p frame of a moving subject never agree in detail. The check exists to catch a frame
+# from the wrong place, not to demand pixel identity — being stricter than this threw away
+# correct screenshots of a fast-cut film (measured, 2026-10-02).
+MATCH_TOLERANCE = 60
 
 
 def _signature(path: str, cols: int = 16, rows: int = 9):
@@ -137,17 +184,47 @@ def tile_jpeg(sheet_path: str, cell: int, cols: int, rows: int, dest: str):
     sw, sh = nums
     tw, th = sw // cols, sh // rows
     x, y = (cell % cols) * tw, (cell // cols) * th
-    # --cropOffset is relative to the CENTRE for sips' crop, so offset from there.
-    r = subprocess.run(["sips", "-c", str(th), str(tw),
-                        "--cropOffset", str(int(y + th / 2 - sh / 2)),
-                        str(int(x + tw / 2 - sw / 2)),
+    # --cropOffset is the TOP-LEFT of the crop, in pixels, as y then x. Treating it as an
+    # offset from the centre produced a solid black rectangle for every tile — and since
+    # the match check compares the grabbed frame against this, every correct frame was
+    # measured against nothing, failed, and was reported as "nothing here". That is why a
+    # film full of robot hands came back with two screenshots (Denis, 2026-10-02).
+    r = subprocess.run(["sips", "-c", str(th), str(tw), "--cropOffset", str(y), str(x),
                         sheet_path, "--out", dest], capture_output=True, text=True)
-    return dest if r.returncode == 0 and os.path.exists(dest) else None
+    if r.returncode != 0 or not os.path.exists(dest):
+        return None
+    # A tile that came out blank is not evidence about anything; saying so lets the caller
+    # skip the comparison instead of trusting a black square.
+    sig = _signature(dest)
+    if sig and max(sig) - min(sig) < 4:
+        return None
+    return dest
+
+
+# Nine descriptions and a verdict. At 120 it ran out of tokens around cell 7 on anything
+# busier than a lecture slide, and the verdict never arrived.
+ANSWER_TOKENS = 400
 
 
 def pick(srv, sheet_path: str, headline: str, cells: int, per_tile: float,
          first_secs: float):
-    """(cell or None, what it saw). Raises ModelError only if the server itself fails."""
-    answer = srv.look(open(sheet_path, "rb").read(),
-                      question(cells, per_tile, first_secs, headline))
-    return verdict(answer, cells)
+    """(cell, what it saw) — cell is an index, None for nothing, -1 for no verdict.
+
+    A reply that never reached a verdict is asked ONCE more, for the verdict alone. The
+    describe-first order is what makes the model willing to pick at all, so the fix for a
+    truncated description is a second question, not a shorter one.
+    """
+    return ask(srv, sheet_path, question(cells, per_tile, first_secs, headline), cells)
+
+
+def ask(srv, sheet_path: str, q: str, cells: int):
+    """Put one question to one sheet, and insist on getting a verdict back."""
+    sheet = open(sheet_path, "rb").read()
+    answer = srv.look(sheet, q, max_tokens=ANSWER_TOKENS)
+    cell, saw = verdict(answer, cells)
+    if cell == -1:
+        again = srv.look(sheet, q + "\n\nAnswer with the cell number alone, or NONE.",
+                         max_tokens=ANSWER_TOKENS)
+        cell, saw2 = verdict(again, cells)
+        saw = saw or saw2
+    return cell, saw

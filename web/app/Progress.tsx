@@ -32,6 +32,10 @@ const STEPS: { key: Stage; label: string; weight: number; secs: number }[] = [
   { key: "download", label: "downloading audio", weight: 8, secs: 10 },
   { key: "transcribe", label: "transcribing", weight: 10, secs: 12 },
   { key: "summarise", label: "summarising", weight: 40, secs: 45 },
+  // DRAWN ONLY WHEN THE RUN IS DOING IT. The filter below keeps the phases the ETA
+  // mentions, and the engine estimates "frames" only when screenshots were asked for — so
+  // this line costs an ordinary run nothing at all.
+  { key: "frames", label: "finding screenshots", weight: 20, secs: 90 },
 ];
 
 export default function Progress({

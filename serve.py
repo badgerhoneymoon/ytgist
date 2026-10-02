@@ -678,7 +678,8 @@ class Handler(BaseHTTPRequestHandler):
                 ytgist.run(req.get("url", ""), req.get("model", "dense"),
                            refresh=bool(req.get("refresh")), progress=progress,
                            native=bool(req.get("native")),
-                           regen=bool(req.get("regen")), control=ctl)
+                           regen=bool(req.get("regen")), control=ctl,
+                           shots=bool(req.get("shots")))
             finally:
                 stop.set()
                 sampler.stop()
