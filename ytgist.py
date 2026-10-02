@@ -228,21 +228,37 @@ def frame_file(vid, secs):
     return os.path.join(FRAMES, vid, f"{int(round(secs))}.jpg")
 
 
-def _look_wider(srv, url, vid, frags, skip, headline, cells, cols, rows, per_sheet,
-                budget=4):
-    """Search the REST of the video for a frame that shows what this claim is about.
+def _candidates(srv, url, vid, frags, home, headline, cells, per_sheet, used_cells):
+    """The (sheet, cell, description) the model is willing to stand behind, best first.
 
-    Spread across the whole thing rather than scanning outwards from the takeaway: an
-    illustration that lives five minutes away is no less useful than one two sheets away,
-    and `budget` sheets evenly spaced cover a long video as fairly as a short one. Returns
-    (sheet index, cell, what it saw).
+    A generator on purpose: the wider search costs model calls, and most takeaways never
+    need it because their own moment answers.
     """
     import frame_picker
+    sheet = os.path.join(SHEETS, vid, f"{home:03d}.jpg")
+    if not os.path.exists(sheet):
+        yt.sheet_jpeg(frags[home]["url"], sheet)
+    per_tile = per_sheet / max(cells, 1)
+    cell, saw = frame_picker.pick(srv, sheet, headline, cells, per_tile,
+                                  home * per_sheet, avoid=used_cells.get(home, ()))
+    if cell is not None and cell >= 0:
+        yield home, cell, saw
+    # ELSEWHERE IN THE VIDEO. A claim made at 00:40 is often demonstrated at 04:10 — the
+    # speaker says what the hand does and the hand does it later (Denis, 2026-10-02) — so
+    # the rest of the video is offered to a takeaway its own 90 seconds could not serve.
+    yield from _wider(srv, vid, frags, home, headline, cells, per_sheet, used_cells)
+
+
+def _wider(srv, vid, frags, skip, headline, cells, per_sheet, used_cells, budget=4):
+    """Sheets spread across the whole video, rather than a crawl outwards from the claim:
+    an illustration five minutes away is no less useful than one two sheets away, and a
+    fixed budget covers a long video as fairly as a short one."""
+    import frame_picker
     if len(frags) < 2:
-        return skip, None, ""
-    order = [round(i * (len(frags) - 1) / max(budget - 1, 1)) for i in range(budget)]
+        return
     seen = set()
-    for n in order:
+    for i in range(budget):
+        n = round(i * (len(frags) - 1) / max(budget - 1, 1))
         if n == skip or n in seen:
             continue
         seen.add(n)
@@ -250,14 +266,59 @@ def _look_wider(srv, url, vid, frags, skip, headline, cells, cols, rows, per_she
         try:
             if not os.path.exists(sheet):
                 yt.sheet_jpeg(frags[n]["url"], sheet)
-            spans = f"{gist_prompt.stamp(n * per_sheet)}-{gist_prompt.stamp((n + 1) * per_sheet)}"
+            span = (f"{gist_prompt.stamp(n * per_sheet)}-"
+                    f"{gist_prompt.stamp((n + 1) * per_sheet)}")
             cell, saw = frame_picker.ask(
-                srv, sheet, frame_picker.question_wide(cells, headline, [spans]), cells)
+                srv, sheet, frame_picker.question_wide(cells, headline, [span]), cells)
         except (IngestError, OSError):
             continue
-        if cell is not None and cell >= 0:
-            return n, cell, saw
-    return skip, None, ""
+        if cell is not None and cell >= 0 and cell not in used_cells.get(n, ()):
+            yield n, cell, saw
+
+
+def _keep_frame(url, vid, n, cell, at, cols, rows, per_tile, kept_sigs):
+    """Grab the moment, prove it is the right one, and refuse it if we have shown it
+    already. True when a frame is now on disk for `at`."""
+    import frame_picker
+    dest = frame_file(vid, at)
+    if os.path.exists(dest):
+        sig = frame_picker._signature(dest)
+        if frame_picker.looks_like(sig, kept_sigs):
+            return False
+        kept_sigs.append(sig)
+        return True
+    sheet = os.path.join(SHEETS, vid, f"{n:03d}.jpg")
+    tile = frame_picker.tile_jpeg(sheet, cell, cols, rows,
+                                  os.path.join(TMP, f"tile-{vid}-{n}-{cell}.jpg"))
+    # NINE CANDIDATES OUT OF ONE DOWNLOAD. The download is the expensive part; pulling
+    # extra frames from the clip costs a few hundred milliseconds each. A quarter-tile
+    # sweep either side covers the drift in a derived timestamp and lands inside a shot
+    # even when the video cuts every few seconds.
+    sweep = tuple(round(per_tile * k / 4, 2) for k in range(-4, 5))
+    cands = {}
+    try:
+        cands = yt.frames_around(url, at, os.path.join(TMP, f"fr-{vid}-{int(at)}"),
+                                 offsets=sweep, margin=4.0)
+        best, ok = (frame_picker.best_match(cands, tile) if tile
+                    else (cands.get(0.0) or next(iter(cands.values())), True))
+        # Not the right moment, or a moment already on the page: showing it anyway is the
+        # one outcome this feature cannot afford, and a reader who sees one shot under two
+        # claims learns that the pictures are decoration.
+        if not best or not ok:
+            return False
+        sig = frame_picker._signature(best)
+        if frame_picker.looks_like(sig, kept_sigs):
+            return False
+        shutil.move(best, dest)
+        kept_sigs.append(sig)
+        return True
+    finally:
+        for junk in list(cands.values()) + [tile]:
+            try:
+                if junk and os.path.exists(junk):
+                    os.remove(junk)
+            except OSError:
+                pass
 
 
 def find_frames(url, vid, native=False, progress=None, control=None):
@@ -298,6 +359,12 @@ def find_frames(url, vid, native=False, progress=None, control=None):
     os.makedirs(TMP, exist_ok=True)
 
     decisions, picked, failed = [], 0, 0
+    # WHAT HAS ALREADY BEEN SHOWN. Each takeaway is asked about on its own, so two of them
+    # landed on the same cell of the same sheet and got the same picture twice, and two
+    # more got different cells of a single shot five seconds apart (Denis, 2026-10-02).
+    # Cells are ruled out in the question; the pictures themselves are compared after the
+    # grab, which is the only way to catch the second kind.
+    used_cells, kept_sigs = {}, []
     srv = model_client.Server.acquire_vision(model=MODELS["dense"], log=log)
     t0 = time.time()
     with srv:
@@ -307,66 +374,25 @@ def find_frames(url, vid, native=False, progress=None, control=None):
             if control is not None and control.cancelled.is_set():
                 raise Cancelled()
             beat(i, f"{i + 1} of {len(items)}")
-            cands = {}
+            home = min(int(secs // per_sheet), len(frags) - 1)
+            found = None
             try:
-                n = min(int(secs // per_sheet), len(frags) - 1)
-                sheet = os.path.join(SHEETS, vid, f"{n:03d}.jpg")
-                if not os.path.exists(sheet):
-                    yt.sheet_jpeg(frags[n]["url"], sheet)
-                cell, saw = frame_picker.pick(srv, sheet, headline, cells, per_tile,
-                                              n * per_sheet)
-                if cell is None or cell < 0:
-                    # ELSEWHERE IN THE VIDEO. A claim made at 00:40 is often shown at
-                    # 04:10 — the speaker says what the hand does and the demonstration
-                    # comes later (Denis, 2026-10-02) — so a takeaway with nothing on its
-                    # own sheet gets the rest of the video offered to it, a few sheets at
-                    # a time, before being told there is nothing.
-                    n, cell, saw = _look_wider(srv, url, vid, frags, n, headline, cells,
-                                               cols, rows, per_sheet)
-                if cell is None or cell < 0:
-                    decisions.append({"state": "none"})
-                    continue
-                sheet = os.path.join(SHEETS, vid, f"{n:03d}.jpg")
-                at = n * per_sheet + cell * per_tile
-                dest = frame_file(vid, at)
-                if os.path.exists(dest):
-                    decisions.append({"state": "found", "secs": int(round(at))})
-                    picked += 1
-                    continue
-                tile = frame_picker.tile_jpeg(
-                    sheet, cell, cols, rows, os.path.join(TMP, f"tile-{vid}-{n}-{cell}.jpg"))
-                # Neighbours either side, out of ONE download: the tile's second is derived
-                # from duration/frame_count rather than read, so the asked-for moment may
-                # simply be the wrong one, and a second download would cost as much again.
-                # NINE CANDIDATES FROM ONE DOWNLOAD. The download is the expensive part;
-                # pulling extra frames out of the clip costs a few hundred milliseconds
-                # each. A quarter-tile sweep either side covers the drift in a derived
-                # timestamp and lands inside a shot even when the video cuts every few
-                # seconds.
-                sweep = tuple(round(per_tile * k / 4, 2) for k in range(-4, 5))
-                cands = yt.frames_around(url, at, os.path.join(TMP, f"fr-{vid}-{int(at)}"),
-                                         offsets=sweep, margin=4.0)
-                best, ok = (frame_picker.best_match(cands, tile) if tile
-                            else (cands.get(0.0) or next(iter(cands.values())), True))
-                if best and ok:
-                    shutil.move(best, dest)
-                    decisions.append({"state": "found", "secs": int(round(at))})
-                    picked += 1
-                    log(f"  {gist_prompt.stamp(at)} · {saw}")
-                else:
-                    # It found something and then could not prove it was the right moment.
-                    # Showing it anyway is the one outcome this feature cannot afford.
-                    decisions.append({"state": "none"})
+                # Each candidate is a (sheet, cell) the model chose — its own moment first,
+                # then elsewhere in the video. A candidate that turns out to be a repeat of
+                # a picture already kept simply moves on to the next one.
+                for n, cell, saw in _candidates(srv, url, vid, frags, home, headline, cells,
+                                                per_sheet, used_cells):
+                    at = n * per_sheet + cell * per_tile
+                    if _keep_frame(url, vid, n, cell, at, cols, rows, per_tile, kept_sigs):
+                        used_cells.setdefault(n, set()).add(cell)
+                        found = {"state": "found", "secs": int(round(at))}
+                        log(f"  {gist_prompt.stamp(at)} · {saw}")
+                        break
+                decisions.append(found or {"state": "none"})
+                picked += found is not None
             except (IngestError, model_client.ModelError, OSError) as e:
                 failed += 1
                 decisions.append({"state": "failed", "why": str(e)[:200]})
-            finally:
-                for junk in list(cands.values()) + glob.glob(
-                        os.path.join(TMP, f"tile-{vid}-*")):
-                    try:
-                        os.remove(junk)
-                    except OSError:
-                        pass
 
     outcome = (f"every attempt failed" if failed == len(items) else
                f"{picked} screenshot{'' if picked == 1 else 's'}"

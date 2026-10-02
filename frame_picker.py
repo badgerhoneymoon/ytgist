@@ -30,8 +30,15 @@ TILE_RE = re.compile(r"^\**(?:cell\s*)?(\d{1,2})\**[.:]?$", re.I)
 NONE_RE = re.compile(r"^\**none\**[.!]?$", re.I)
 
 
-def question(cells: int, per_tile: float, first_secs: float, headline: str) -> str:
+def question(cells: int, per_tile: float, first_secs: float, headline: str,
+             avoid=()) -> str:
     span = f"{int(first_secs) // 60}:{int(first_secs) % 60:02d}"
+    # ALREADY SPOKEN FOR. Two takeaways minutes apart landed on the same cell of the same
+    # sheet and got the same picture twice (Denis, 2026-10-02) — reasonably, since each
+    # question was asked as if it were the only one. Saying which cells are taken costs a
+    # line and removes the commonest duplicate.
+    taken = (f"Cells {', '.join(str(c + 1) for c in sorted(avoid))} are already used for "
+             "other points in this summary — do not choose them.\n\n" if avoid else "")
     return (
         f"A {cells}-cell grid of video thumbnails, numbered 1-{cells} left to right, top to "
         f"bottom, about {per_tile:.0f} seconds apart starting at {span}.\n\n"
@@ -42,9 +49,11 @@ def question(cells: int, per_tile: float, first_secs: float, headline: str) -> s
         "THE CLAIM IS ABOUT: the thing itself, being used, demonstrated, measured or drawn. "
         "Prefer a close view of the subject over a wide shot, and the subject over anyone "
         "describing it.\n\n"
+        + taken +
         "Answer NONE only if every cell is a person talking, a logo or a title card with "
-        "none of the subject visible. A portrait of a speaker adds nothing to a written "
-        "argument — but the thing they are talking about does.\n\n"
+        "none of the subject visible, or if the only cells that fit are already used. A "
+        "portrait of a speaker adds nothing to a written argument — but the thing they are "
+        "talking about does.\n\n"
         "Reply with one line of what you see, then a final line that is the cell number "
         "alone, or the single word NONE."
     )
@@ -206,15 +215,29 @@ def tile_jpeg(sheet_path: str, cell: int, cols: int, rows: int, dest: str):
 ANSWER_TOKENS = 400
 
 
+def looks_like(sig, kept, distance: int = 20) -> bool:
+    """Is this frame one we have already shown?
+
+    Cells are not the only way to repeat yourself: two different cells of the same sheet,
+    five seconds apart, were the same shot of the same hand (Denis, 2026-10-02). Comparing
+    the FRAMES catches that, where comparing their timestamps or their cells cannot. The
+    threshold is deliberately tighter than the tile check — this asks "is this the same
+    picture", not "is this the same scene".
+    """
+    return any(sig and k and len(sig) == len(k)
+               and sum(abs(a - b) for a, b in zip(sig, k)) / len(sig) <= distance
+               for k in kept)
+
+
 def pick(srv, sheet_path: str, headline: str, cells: int, per_tile: float,
-         first_secs: float):
+         first_secs: float, avoid=()):
     """(cell, what it saw) — cell is an index, None for nothing, -1 for no verdict.
 
     A reply that never reached a verdict is asked ONCE more, for the verdict alone. The
     describe-first order is what makes the model willing to pick at all, so the fix for a
     truncated description is a second question, not a shorter one.
     """
-    return ask(srv, sheet_path, question(cells, per_tile, first_secs, headline), cells)
+    return ask(srv, sheet_path, question(cells, per_tile, first_secs, headline, avoid), cells)
 
 
 def ask(srv, sheet_path: str, q: str, cells: int):
