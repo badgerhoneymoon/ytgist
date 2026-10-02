@@ -1,7 +1,11 @@
 /** The shapes the Python engine streams over SSE. Kept in one file so the UI and the
  *  backend contract are visible in a single place. */
 
-export type Stage = "check" | "download" | "transcribe" | "summarise" | "cached" | "done";
+// "frames" is the screenshot pass. It is a stage the ENGINE reports but the progress bar
+// never draws: that bar is a run's four phases against their ETAs, and this is a separate
+// job that reports itself inside the result.
+export type Stage =
+  | "check" | "download" | "transcribe" | "summarise" | "cached" | "done" | "frames";
 
 export type Sentence = { start: number; end: number; text: string };
 
@@ -25,7 +29,23 @@ export type Frame = {
   duration?: number;
   cached?: boolean;
   sentences?: Sentence[];
+  // The screenshot pass: one verdict per takeaway, in the order they are read, plus a
+  // sentence about how the search itself went. Both arrive with a finished summary and
+  // again when a search finishes.
+  frames?: Shot[];
+  frames_outcome?: string;
+  frames_done?: boolean;
 };
+
+/** What the screenshot search concluded about ONE takeaway. Three outcomes, deliberately
+ *  distinct: a failed search and an empty one both end with no picture, and calling the
+ *  first "nothing to show" would hide a broken download behind a tidy sentence.
+ *
+ *  Named Shot, not Frame: `Frame` in this file is one SSE message. */
+export type Shot =
+  | { state: "found"; secs: number }
+  | { state: "none" }
+  | { state: "failed"; why?: string };
 
 export type Takeaway = {
   headline: string;
@@ -36,6 +56,8 @@ export type Takeaway = {
   // Saved detail for this step, if it was expanded before. "" means asked-and-nothing,
   // which is different from null (never asked) and must survive a reload as such.
   expansion: string | null;
+  // This step's screenshot verdict, or null when nothing has ever looked.
+  frame: Shot | null;
 };
 
 export type Gist = {
@@ -46,6 +68,9 @@ export type Gist = {
   timings: Record<string, number>;
   duration: number;
   cached: boolean;
+  // "" when no screenshot search has ever run for this summary — which is why the button
+  // can say "Find screenshots" the first time and report what happened afterwards.
+  framesOutcome: string;
 };
 
 /** A cited moment inside an answer: the model wrote [MM:SS], the engine verified it

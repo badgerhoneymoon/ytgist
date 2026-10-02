@@ -355,6 +355,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith("/api/frame"):
+            self._frame()
         elif self.path.startswith("/api/probe"):
             self._probe()
         elif self.path.startswith("/api/current"):
@@ -397,6 +399,29 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     _probe_cache = {}
+
+    def _frame(self):
+        """One saved screenshot. Path built from a VALIDATED id and an integer second —
+        never from anything the caller spells, so there is no path to traverse."""
+        from urllib.parse import parse_qs, urlparse
+        qs = parse_qs(urlparse(self.path).query)
+        vid = (qs.get("v") or [""])[0]
+        secs = (qs.get("t") or [""])[0]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{11}", vid or "") or not secs.isdigit():
+            return self.send_error(400)
+        path = ytgist.frame_file(vid, int(secs))
+        try:
+            data = open(path, "rb").read()
+        except OSError:
+            return self.send_error(404)
+        self.send_response(200)
+        self._cors()
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(data)))
+        # Content-addressed by video and second: the file for a given pair never changes.
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _probe(self):
         """Title, channel, DURATION and this video's own estimate.
@@ -484,7 +509,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 break                               # the tab closed; stop writing
-            if "markdown" in ev or "error" in ev:
+            if "markdown" in ev or "error" in ev or "frames_done" in ev:
                 break
         _jobs.pop(job, None)
 
@@ -504,6 +529,27 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     traceback.print_exc()
                     body = json.dumps({"error": f"{type(exc).__name__}: {exc}"}).encode()
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path == "/api/frames":
+            # A JOB, not a blocking call like /api/expand: a screenshot pass is a loop over
+            # every takeaway with a model load in front of it, so it needs the same
+            # progress, reconnect and cancel the summary has.
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n) or b"{}") or {}
+            job = uuid.uuid4().hex
+            q = queue.Queue()
+            _jobs[job] = q
+            ctl = Control()
+            _ctl[job] = ctl
+            threading.Thread(target=self._work_frames, args=(q, req, ctl, job),
+                             daemon=True).start()
+            body = json.dumps({"job": job}).encode()
             self.send_response(200)
             self._cors()
             self.send_header("Content-Type", "application/json")
@@ -543,6 +589,40 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    @staticmethod
+    def _work_frames(q, req, ctl=None, job=None):
+        """The screenshot pass, as a job.
+
+        Takes the SAME run lock as a summary — it starts a model server, and two of those
+        is how a run was lost once already — and reports its own phase so the page can show
+        progress rather than a frozen bar.
+        """
+        try:
+            if not _RUN.acquire(blocking=False):
+                q.put({"stage": "frames", "pct": 2,
+                       "msg": "another job is running — waiting for the model"})
+                _RUN.acquire()
+            try:
+                decisions, outcome = ytgist.find_frames(
+                    req.get("url", ""), req.get("video", ""),
+                    native=bool(req.get("native")),
+                    progress=lambda f: q.put(f), control=ctl)
+                q.put({"frames": decisions, "frames_outcome": outcome, "frames_done": True})
+                # The saved summary now carries the frames; a rejoining page reads the
+                # snapshot, so it has to carry them too or a reload shows an empty result.
+                if isinstance(_current.get("result"), dict):
+                    _current["result"]["frames"] = decisions
+                    _current["result"]["frames_outcome"] = outcome
+            finally:
+                _RUN.release()
+        except ytgist.Cancelled:
+            q.put({"stopped": True})
+        except (ytgist.yt.IngestError, ytgist.model_client.ModelError) as e:
+            q.put({"error": str(e)})
+        except Exception as e:
+            traceback.print_exc()
+            q.put({"error": f"{type(e).__name__}: {e}"})
 
     @staticmethod
     def _work(q, req, ctl=None, job=None):
@@ -624,7 +704,13 @@ class Handler(BaseHTTPRequestHandler):
                    "duration": res.get("duration", 0),
                    "cached": res.get("cached", False),
                    "sentences": res.get("sentences") or [],
-                   "expansions": res.get("expansions") or {}}
+                   "expansions": res.get("expansions") or {},
+                   # This dict and the snapshot both name their fields explicitly, so a
+                   # field not listed here simply vanishes on rejoin (Codex r2). A
+                   # screenshot search that already ran must survive a reload the way
+                   # expansions do.
+                   "frames": res.get("frames") or [],
+                   "frames_outcome": res.get("frames_outcome") or ""}
             _current["result"] = final
             _current["at"] = time.time()
             q.put(final)

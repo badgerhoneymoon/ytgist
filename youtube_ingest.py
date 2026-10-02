@@ -12,6 +12,8 @@ import signal
 import subprocess
 import tempfile
 import time
+import urllib.error
+import urllib.request
 
 # Strict host allowlist. A lookalike domain must not reach yt-dlp at all — parsing an
 # id out of "youtube.com.evil.tld/watch?v=…" and handing it over is how a URL parser
@@ -224,6 +226,115 @@ def fetch_audio(url: str, dest_dir: str, timeout: int = 3600, on_retry=None) -> 
         raise IngestError("unknown", "yt-dlp reported success but produced no audio "
                                      "(the video may have no audio track)")
     return os.path.join(dest_dir, wavs[0])
+
+
+def storyboard(url: str) -> dict:
+    """YouTube's own contact sheets: fragments, grid shape, and seconds per tile.
+
+    One ~25 KB WebP per ~90 seconds of video, each a 3x3 grid of 320x180 tiles — the whole
+    of an 80-minute video for 1.5 MB and a single listing call, which is why the picker
+    looks here before downloading one frame of video.
+
+    THE TIMING IS APPROXIMATE AND CALLERS MUST TREAT IT THAT WAY. The installed yt-dlp
+    discards the storyboard spec's real interval and derives fragment duration from
+    duration/frame_count (Codex r3), so a tile's second is a good guess, not a fact — which
+    is why the frame grab verifies what it got against the tile it came from.
+    """
+    rc, out, err = _run(["yt-dlp", "--ignore-config", "--no-playlist", "--skip-download",
+                         "--dump-single-json", "--", url], timeout=90)
+    if rc != 0:
+        kind, msg = _classify(err)
+        raise IngestError(kind, msg)
+    try:
+        formats = json.loads(out).get("formats", [])
+    except ValueError:
+        raise IngestError("unknown", "yt-dlp returned metadata that isn't JSON")
+    # The biggest sheet there is: sb0 gives 320x180 tiles, sb3 gives 48x27, and the picker
+    # is already working at the edge of what can be made out.
+    sheets = sorted((f for f in formats
+                     if str(f.get("format_id", "")).startswith("sb") and f.get("fragments")),
+                    key=lambda f: -(f.get("width") or 0))
+    if not sheets:
+        raise IngestError("no_storyboard", "This video has no storyboard thumbnails.")
+    sb = sheets[0]
+    frags = sb["fragments"]
+    per = float(frags[0].get("duration") or 0) or 1.0
+    cols, rows = int(sb.get("columns") or 1), int(sb.get("rows") or 1)
+    return {"fragments": frags, "cols": cols, "rows": rows, "per_sheet": per,
+            "per_tile": per / max(cols * rows, 1)}
+
+
+def sheet_jpeg(frag_url: str, dest: str) -> str:
+    """One storyboard sheet, as a JPEG on disk.
+
+    sips, NOT ffmpeg. ffmpeg cannot decode YouTube's storyboard WebP: it fails, loops and
+    writes a 1.5 GB "jpg" per input — measured, on a disk that had just been cleared
+    (2026-10-02). The size check below is that afternoon, written down.
+    """
+    webp = dest + ".webp"
+    try:
+        urllib.request.urlretrieve(frag_url, webp)
+        r = subprocess.run(["sips", "-s", "format", "jpeg", webp, "--out", dest],
+                           capture_output=True, text=True)
+        if r.returncode != 0 or not os.path.exists(dest):
+            raise IngestError("sheet", "could not convert a storyboard sheet")
+        if os.path.getsize(dest) > 8_000_000:       # a sheet is ~120 KB; 8 MB is a runaway
+            os.remove(dest)
+            raise IngestError("sheet", "storyboard conversion produced a runaway file")
+        return dest
+    except (urllib.error.URLError, OSError) as e:
+        raise IngestError("network", f"could not fetch a storyboard sheet: {e}")
+    finally:
+        try:
+            os.remove(webp)
+        except OSError:
+            pass
+
+
+def frames_around(url: str, secs: float, dest_prefix: str, offsets=(0.0,),
+                  margin: float = 4.0, timeout: int = 180) -> dict:
+    """{offset: jpeg path} — several candidate frames from ONE download.
+
+    Two problems meet here. --download-sections cuts on KEYFRAMES, so the clip does not
+    begin at the second asked for and its first frame can be a different slide entirely
+    (Codex r1); ffmpeg therefore seeks inside the clip to the real offset. And the second
+    itself is only approximate, because yt-dlp derives storyboard timing rather than
+    reading it (Codex r3) — so the caller asks for neighbours too and keeps whichever
+    actually matches the tile it chose. Video only, 720p: a window's audio is pure cost.
+    """
+    lo, hi = min(offsets), max(offsets)
+    start = max(0.0, secs + lo - margin)
+    clip = dest_prefix + ".clip.mp4"
+    rc, _out, err = _run([
+        "yt-dlp", "--ignore-config", "--no-playlist",
+        "-f", "bv[height<=720]/bv*[height<=720]/best[height<=720]/best",
+        "--download-sections", f"*{start:.2f}-{secs + hi + margin:.2f}",
+        "--retries", "3", "--fragment-retries", "3",
+        "--no-progress", "-o", clip, "--", url], timeout=timeout)
+    if rc != 0 or not os.path.exists(clip):
+        kind, msg = _classify(err)
+        raise IngestError(kind, msg)
+    out = {}
+    try:
+        for off in offsets:
+            at = secs + off - start
+            if at < 0:
+                continue
+            dest = f"{dest_prefix}{'' if off == 0 else f'{off:+.0f}'}.jpg"
+            r = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+                                "-ss", f"{at:.2f}", "-i", clip,
+                                "-frames:v", "1", "-q:v", "3", dest],
+                               capture_output=True, text=True)
+            if r.returncode == 0 and os.path.exists(dest):
+                out[off] = dest
+        if not out:
+            raise IngestError("frame", "ffmpeg could not extract a frame")
+        return out
+    finally:
+        try:
+            os.remove(clip)
+        except OSError:
+            pass
 
 
 def temp_dir(root: str) -> str:

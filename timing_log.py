@@ -95,6 +95,24 @@ def record(minutes: float, cached: bool, ctx: int, timings: dict, native: bool =
         pass
 
 
+FRAMES = os.path.expanduser("~/.ytgist/frames.jsonl")
+
+
+def record_frames(takeaways: int, picked: int, secs: float):
+    """One screenshot pass. Its own file, for the same reason expansions have one: it is a
+    different shape of work — a vision model load, N contact sheets, and a video download
+    only for the moments that were chosen — and averaging it into the summarise fit would
+    corrupt the ETA that runs.jsonl exists to produce."""
+    try:
+        os.makedirs(os.path.dirname(FRAMES), exist_ok=True)
+        row = {"at": time.time(), "takeaways": int(takeaways), "picked": int(picked),
+               "power": power_mode(), "secs": round(float(secs), 2)}
+        with open(FRAMES, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+    except Exception:
+        pass
+
+
 def record_expand(minutes: float, chars: int, warm: bool, secs: float, native: bool = False):
     """One "more detail" click. Kept in its OWN file, not runs.jsonl.
 

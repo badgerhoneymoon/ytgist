@@ -18,6 +18,10 @@ export function parseGist(f: Frame, videoId: string): Gist {
   const tldr = tldrMatch ? tldrMatch[1].trim() : "";
 
   const expansions = f.expansions ?? {};
+  // ONE VERDICT PER TAKEAWAY, IN ORDER — not a map keyed by second. Two takeaways can cite
+  // the same verified moment (reproduced: two at 05:00), and a map would give both the same
+  // answer while silently discarding one of the two decisions.
+  const shots = f.frames ?? [];
   const takeaways: Takeaway[] = [];
   // Split on the bold headlines; everything until the next one is that takeaway's body.
   const parts = raw.split(/\*\*(.+?)\*\*/g);
@@ -60,6 +64,7 @@ export function parseGist(f: Frame, videoId: string): Gist {
       evidence: seconds === null ? "" : evidenceAt(sentences, seconds),
       expansion:
         seconds !== null && String(seconds) in expansions ? expansions[String(seconds)] : null,
+      frame: shots[takeaways.length] ?? null,
     });
   }
 
@@ -71,6 +76,7 @@ export function parseGist(f: Frame, videoId: string): Gist {
     timings: f.timings ?? {},
     duration: f.duration ?? 0,
     cached: !!f.cached,
+    framesOutcome: f.frames_outcome ?? "",
   };
 }
 

@@ -79,6 +79,51 @@ def ctx_ceiling(model: str = None) -> int:
     return best
 
 
+# ------------------------------------------------------------------ seeing
+#
+# The same GGUF can SEE, given its multimodal projector — but only in a server STARTED with
+# one, so vision is an acquisition requirement here and never inferred from "the file is on
+# disk" (Codex r1). A warm or borrowed text server has no idea what a picture is.
+#
+# It gets its own short-lived server for three measured reasons: a projector makes
+# llama.cpp disable chunk-cache reuse and context shifting, and summaries deliberately run
+# --cache-reuse 256; the projector's memory would otherwise be charged to every ordinary
+# summary through ctx_ceiling(); and the picker needs a few hundred tokens per image, not a
+# transcript-sized context.
+MMPROJ = os.path.expanduser(os.environ.get(
+    "YTGIST_MMPROJ", "~/models/mmproj-F16-Qwen3.6-27B.gguf"))
+VISION_CTX = 8192            # one contact sheet and its question; nothing is cached here
+_VISION_WORK_GB = 1.5        # the projector plus its compute buffers, measured on the 27B
+
+
+def vision_model_available() -> bool:
+    """Is a projector on disk at all? A different question from 'can this server see'."""
+    return os.path.isfile(MMPROJ) and os.path.isfile(MODEL)
+
+
+def vision_fits(model: str = None) -> str:
+    """'' if a vision pass fits in memory, otherwise the sentence to show instead.
+
+    Shrinking is not available the way it is for a summary: there is no smaller context to
+    retreat to once the model, its projector and whatever is ALREADY RESIDENT do not fit
+    together, and quietly returning the bottom of the ladder would just swap (Codex r2).
+    A borrowed server is counted and never killed — it is not ours (Codex r3).
+    """
+    try:
+        model_gb = os.path.getsize(model or MODEL) / 1e9
+    except OSError:
+        model_gb = 20.0
+    with _warm_lock:
+        parked = _warm["srv"]
+    resident = model_gb if (parked is not None and parked.borrowed) else 0.0
+    need = model_gb + _VISION_WORK_GB + resident + _OVERHEAD_GB
+    if need > _RAM_GB:
+        return (f"Finding screenshots needs about {need:.0f} GB of memory and this Mac has "
+                f"{_RAM_GB:.0f} GB" +
+                (", with another model server already running" if resident else "") + ".")
+    return ""
+
+
 def ctx_for(need_tokens: int) -> int:
     """Smallest context on the ladder that fits the prompt plus its answer."""
     if not need_tokens:
@@ -260,11 +305,16 @@ def sweep_orphans(log=print) -> int:
 class Server:
     """Either a borrowed server (we leave it alone) or one we own (we stop it)."""
 
-    def __init__(self, base: str, proc=None, ctx: int = CTX, model: str = MODEL):
+    def __init__(self, base: str, proc=None, ctx: int = CTX, model: str = MODEL,
+                 vision: bool = False):
         self.base, self._proc, self.ctx = base, proc, ctx
         self.model = model
         self.borrowed = proc is None
         self.was_warm = False        # set when handed out of the warm pool, for the log
+        # WHAT THIS PROCESS CAN DO, recorded when it was started — not guessed from the
+        # filesystem later. A text server with a projector sitting unused beside it on disk
+        # still cannot see (Codex r1).
+        self.vision = vision
 
     # ---------------------------------------------------------------- lifecycle
     @classmethod
@@ -302,7 +352,24 @@ class Server:
         return cls(base, proc=None, ctx=ctx or CTX)
 
     @classmethod
-    def _start(cls, model, log, ctx=CTX):
+    def acquire_vision(cls, model: str = MODEL, log=print):
+        """A server that can SEE, or a ModelError saying why not.
+
+        It is never borrowed and never warm: both of those are text servers. The parked
+        text server is STOPPED and its exit awaited first — parking deliberately keeps a
+        19 GB process alive for minutes, so "stop or park" would have allowed both models
+        resident at once, which is the thing this sequence exists to prevent (Codex r2).
+        """
+        if not os.path.isfile(MMPROJ):
+            raise ModelError(f"no multimodal projector at {MMPROJ}")
+        why = vision_fits(model)
+        if why:
+            raise ModelError(why)
+        warm_stop()                   # synchronous: stop() waits for the process to exit
+        return cls._start(model, log, VISION_CTX, mmproj=MMPROJ)
+
+    @classmethod
+    def _start(cls, model, log, ctx=CTX, mmproj=None):
         if not os.path.isfile(model):
             raise ModelError(f"model not found: {model}")
         port = _free_port()
@@ -315,12 +382,18 @@ class Server:
         # --cache-reuse lets the server keep a prompt prefix it has already processed, so
         # a second call over the same transcript skips straight to the new tail.
         cmd = ["llama-server", "-m", model, "-c", str(ctx), "-fa", "on", "-np", "1",
-               "--cache-reuse", "256",
                "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
                "--port", str(port), "--reasoning", "off", "--reasoning-budget", "0",
                "--alias", ALIAS]
-        log(f"  starting llama-server on :{port} with a {ctx // 1024}k context "
-            f"(own process, stopped when done)")
+        if mmproj:
+            # NO --cache-reuse HERE. llama.cpp disables chunk cache reuse and context
+            # shifting for a multimodal server anyway and says so on startup; passing it
+            # would only promise something the server has already refused.
+            cmd += ["--mmproj", mmproj]
+        else:
+            cmd += ["--cache-reuse", "256"]
+        log(f"  starting llama-server on :{port} with a {ctx // 1024}k context"
+            f"{' and vision' if mmproj else ''} (own process, stopped when done)")
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 start_new_session=True)
         base = f"http://127.0.0.1:{port}"
@@ -331,7 +404,7 @@ class Server:
                                  "(run it by hand to see why)")
             try:
                 if _get(base, "/health", timeout=2).get("status") == "ok":
-                    srv = cls(base, proc=proc, ctx=ctx)
+                    srv = cls(base, proc=proc, ctx=ctx, vision=bool(mmproj))
                     srv.model = model
                     return srv
             except Exception:
@@ -359,6 +432,12 @@ class Server:
         return self
 
     def __exit__(self, *exc):
+        # A VISION SERVER IS NEVER PARKED. The pool hands servers to summarise and expand,
+        # which need cache reuse and a transcript-sized context — neither of which this one
+        # has — and leaving a second 19 GB process parked is the residency problem again.
+        if self.vision:
+            self.stop()
+            return False
         # Released to the warm pool, not killed. Expanding a takeaway re-reads the same
         # transcript prefix every time, and llama.cpp can reuse a cached prefix — but only
         # if the process that holds it is still alive. Killing it after every job threw
@@ -392,6 +471,25 @@ class Server:
             # so callers keep passing 0.2-0.3 deliberately.
             **QWEN_SAMPLING,
         }, timeout=GEN_TIMEOUT)
+        try:
+            return r["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError, AttributeError):
+            raise ModelError(f"unexpected response from llama-server: {str(r)[:200]}")
+
+    def look(self, jpeg: bytes, question: str, max_tokens: int = 120,
+             temperature: float = 0.1, timeout: int = 180) -> str:
+        """Ask about an image. Only a server started with a projector can answer."""
+        if not self.vision:
+            raise ModelError("this server was started without a projector — it cannot see")
+        import base64
+        url = "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()
+        r = _post(self.base, "/v1/chat/completions", {
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": url}},
+                {"type": "text", "text": question}]}],
+            "max_tokens": max_tokens, "temperature": temperature, "stream": False,
+            **QWEN_SAMPLING,
+        }, timeout=timeout)
         try:
             return r["choices"][0]["message"]["content"].strip()
         except (KeyError, IndexError, AttributeError):

@@ -42,6 +42,12 @@ export default function Home() {
   const [msg, setMsg] = useState("");
   const [gist, setGist] = useState<Gist | null>(null);
   const [error, setError] = useState("");
+  // THE SCREENSHOT PASS IS NOT A RUN, and must not drive the run's progress bar: that bar
+  // draws four known stages against their own ETAs, and a fifth it has never heard of
+  // renders as a gap. It reports itself inside the result, next to the button that started
+  // it — the same place "More detail" reports.
+  const [shotMsg, setShotMsg] = useState("");
+  const [shotBusy, setShotBusy] = useState(false);
   const busy = stage !== null;
 
   const videoId = parseYouTube(url);
@@ -161,6 +167,35 @@ export default function Home() {
     es.onmessage = (ev) => {
       arm();
       const f: Frame = JSON.parse(ev.data);
+      // ONE HANDLER FOR BOTH KINDS OF JOB. A second EventSource handler is what once left
+      // the machine readout invisible on fresh runs; the difference between a summary and
+      // a screenshot pass belongs in two lines here, not in two subscriptions.
+      if (f.stage === "frames") {
+        setShotMsg(f.msg ?? "");
+        return;
+      }
+      if (f.frames_done) {
+        setGist((g) =>
+          g
+            ? {
+                ...g,
+                framesOutcome: f.frames_outcome ?? "",
+                takeaways: g.takeaways.map((t, i) => ({ ...t, frame: f.frames?.[i] ?? t.frame })),
+              }
+            : g,
+        );
+        setShotBusy(false);
+        setShotMsg("");
+        done();
+        return;
+      }
+      if (f.error || f.stopped) {
+        // Cleared unconditionally: reading shotBusy here would read whatever it was when
+        // this callback was created, and clearing it when it is already false costs
+        // nothing.
+        setShotBusy(false);
+        setShotMsg("");
+      }
       if (f.pct !== undefined) setPct(f.pct);
       if (f.stage) setStage(f.stage === "cached" ? "summarise" : f.stage);
       if (f.msg) setMsg(f.msg);
@@ -212,6 +247,34 @@ export default function Home() {
       })
       .catch(() => {});
   }, [attach]);
+
+  /** Look for a screenshot worth showing beside each takeaway. A second pass over a
+   *  summary that already exists — never part of a run, so a video with no slides pays
+   *  nothing and a failed search cannot cost a summary. */
+  const findShots = useCallback(async () => {
+    if (!gist || busy || shotBusy) return;
+    setShotBusy(true);
+    setShotMsg("starting");
+    setError("");
+    try {
+      const res = await fetch(`${ENGINE}/api/frames`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: `https://www.youtube.com/watch?v=${gist.videoId}`,
+          video: gist.videoId,
+          native,
+        }),
+      });
+      const { job } = await res.json();
+      if (!job) throw new Error("no job");
+      attach(job, `https://www.youtube.com/watch?v=${gist.videoId}`);
+    } catch {
+      setShotBusy(false);
+      setShotMsg("");
+      setError("Couldn't start the screenshot search — is the engine running?");
+    }
+  }, [attach, busy, gist, native, shotBusy]);
 
   const start = useCallback(
     async (
@@ -403,6 +466,10 @@ export default function Home() {
           native={native}
           onRegenerate={() => start("regen")}
           onRetranscribe={() => start("refresh")}
+          onFindShots={findShots}
+          shotBusy={shotBusy}
+          shotMsg={shotMsg}
+          onCancelShots={cancel}
         />
       )}
 

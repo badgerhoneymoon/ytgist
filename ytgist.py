@@ -186,6 +186,141 @@ def expand(vid, start, end, headline, body, native=False, log=print):
     return text
 
 
+# ----------------------------------------------------------------- screenshots
+#
+# A SECOND PASS over a finished summary, never part of a run: a first run already costs
+# minutes with someone watching it, a video with no slides should pay nothing at all, and a
+# failed search must never be able to cost a summary.
+FRAMES_V = 1
+SHEETS = os.path.join(CACHE, "sheets")
+FRAMES = os.path.join(CACHE, "frames")
+# Every verified citation, in reading order. LINKS ONLY: a bare [12:34] is a stamp the
+# verifier could not find in the transcript and deleted, and an unverified second is
+# exactly where a confidently wrong screenshot would come from (Codex r2).
+_CITED = re.compile(r"\*\*(.+?)\*\*[^\n]*?\[(\d{1,2}:\d{2}(?::\d{2})?)\]\(https?://[^)]+\)")
+
+
+def load_frames(vid, native=False):
+    """(decisions, outcome) for a saved summary — [] and "" when it was never searched."""
+    saved = load_summary(vid, native) or {}
+    if saved.get("frames_v") != FRAMES_V:
+        return [], ""
+    return saved.get("frames") or [], saved.get("frames_outcome") or ""
+
+
+def frame_file(vid, secs):
+    """One JPEG per video per captured second. The FILE dedupes by moment; the DECISIONS
+    never do — two takeaways can cite the same second and reach different verdicts, and a
+    map keyed by second would silently give both the same answer (Codex r3)."""
+    return os.path.join(FRAMES, vid, f"{int(round(secs))}.jpg")
+
+
+def find_frames(url, vid, native=False, progress=None, control=None):
+    """Look for a screenshot worth showing beside each takeaway.
+
+    Returns (decisions, outcome), one decision per takeaway, in order:
+        {"state": "found",  "secs": s}   a frame on disk, verified against its own tile
+        {"state": "none"}                looked, and there was nothing worth showing
+        {"state": "failed", "why": "…"}  looked, and the search itself broke
+
+    Those three are not interchangeable. Fifteen genuine "none"s and fifteen failed
+    downloads both end with no pictures, and calling the second "no screenshots in this
+    video" would be a lie (Codex r1) — the same distinction `expansion` already draws
+    between never-asked and asked-and-nothing.
+    """
+    import frame_picker
+
+    saved = load_summary(vid, native)
+    if not saved:
+        raise IngestError("missing", "That summary is no longer cached — summarise it again.")
+    items = [(h.strip(), gist_prompt.to_seconds(s))
+             for h, s in _CITED.findall(saved.get("text", ""))]
+    if not items:
+        return [], "no verified timestamps to look at"
+
+    def beat(i, msg):
+        if progress:
+            progress({"stage": "frames", "pct": 5 + int(90 * i / max(len(items), 1)),
+                      "msg": msg})
+
+    beat(0, "asking YouTube for thumbnails")
+    board = yt.storyboard(url)              # no sheets at all: the whole pass cannot run
+    cols, rows = board["cols"], board["rows"]
+    cells, per_sheet, per_tile = cols * rows, board["per_sheet"], board["per_tile"]
+    frags = board["fragments"]
+    os.makedirs(os.path.join(SHEETS, vid), exist_ok=True)
+    os.makedirs(os.path.join(FRAMES, vid), exist_ok=True)
+    os.makedirs(TMP, exist_ok=True)
+
+    decisions, picked, failed = [], 0, 0
+    srv = model_client.Server.acquire_vision(model=MODELS["dense"], log=log)
+    t0 = time.time()
+    with srv:
+        for i, (headline, secs) in enumerate(items):
+            # .is_set(), not the Event itself — an Event object is always truthy, so the
+            # bare attribute cancelled every pass on its first takeaway.
+            if control is not None and control.cancelled.is_set():
+                raise Cancelled()
+            beat(i, f"{i + 1} of {len(items)}")
+            cands = {}
+            try:
+                n = min(int(secs // per_sheet), len(frags) - 1)
+                sheet = os.path.join(SHEETS, vid, f"{n:03d}.jpg")
+                if not os.path.exists(sheet):
+                    yt.sheet_jpeg(frags[n]["url"], sheet)
+                cell, saw = frame_picker.pick(srv, sheet, headline, cells, per_tile,
+                                              n * per_sheet)
+                if cell is None:
+                    decisions.append({"state": "none"})
+                    continue
+                at = n * per_sheet + cell * per_tile
+                dest = frame_file(vid, at)
+                if os.path.exists(dest):
+                    decisions.append({"state": "found", "secs": int(round(at))})
+                    picked += 1
+                    continue
+                tile = frame_picker.tile_jpeg(
+                    sheet, cell, cols, rows, os.path.join(TMP, f"tile-{vid}-{n}-{cell}.jpg"))
+                # Neighbours either side, out of ONE download: the tile's second is derived
+                # from duration/frame_count rather than read, so the asked-for moment may
+                # simply be the wrong one, and a second download would cost as much again.
+                cands = yt.frames_around(url, at, os.path.join(TMP, f"fr-{vid}-{int(at)}"),
+                                         offsets=(0.0, -per_tile, per_tile),
+                                         margin=min(per_tile, 6.0))
+                best, ok = (frame_picker.best_match(cands, tile) if tile
+                            else (cands.get(0.0) or next(iter(cands.values())), True))
+                if best and ok:
+                    shutil.move(best, dest)
+                    decisions.append({"state": "found", "secs": int(round(at))})
+                    picked += 1
+                    log(f"  {gist_prompt.stamp(at)} · {saw}")
+                else:
+                    # It found something and then could not prove it was the right moment.
+                    # Showing it anyway is the one outcome this feature cannot afford.
+                    decisions.append({"state": "none"})
+            except (IngestError, model_client.ModelError, OSError) as e:
+                failed += 1
+                decisions.append({"state": "failed", "why": str(e)[:200]})
+            finally:
+                for junk in list(cands.values()) + glob.glob(
+                        os.path.join(TMP, f"tile-{vid}-*")):
+                    try:
+                        os.remove(junk)
+                    except OSError:
+                        pass
+
+    outcome = (f"every attempt failed" if failed == len(items) else
+               f"{picked} screenshot{'' if picked == 1 else 's'}"
+               + (f", {failed} failed" if failed else ""))
+    saved = load_summary(vid, native) or saved
+    saved["frames_v"], saved["frames"] = FRAMES_V, decisions
+    saved["frames_outcome"] = outcome
+    save_summary(vid, saved, native)
+    timing_log.record_frames(len(items), picked, time.time() - t0)
+    log(f"  screenshots: {outcome} in {time.time() - t0:.0f}s")
+    return decisions, outcome
+
+
 _SCAFFOLD = re.compile(
     r"\b(?:the|our|this)\s+speaker\s+"
     r"(?:notes?|claims?|says?|states?|explains?|outlines?|suggests?|argues?|points? out|"
@@ -479,7 +614,13 @@ def run(url, model_key="dense", refresh=False, progress=None,
                     "raw": saved["text"], "dropped": 0, "video_id": vid,
                     "timings": {}, "duration": meta.get("duration", 0),
                     "cached": True, "sentences": sentences, "from_saved": True,
-                    "expansions": saved.get("expansions") or {}}
+                    "expansions": saved.get("expansions") or {},
+                    # Screenshots found earlier come back with the summary. Opening the
+                    # library restores what a search found; it never starts one.
+                    "frames": (saved.get("frames") or []
+                               if saved.get("frames_v") == FRAMES_V else []),
+                    "frames_outcome": (saved.get("frames_outcome") or ""
+                                       if saved.get("frames_v") == FRAMES_V else "")}
         return 0
 
     transcript = gist_prompt.format_transcript(sentences)
@@ -544,7 +685,7 @@ def run(url, model_key="dense", refresh=False, progress=None,
                 "video_id": vid, "timings": timings,
                 "duration": meta.get("duration", 0), "cached": was_cached,
                 "sentences": sentences,   # the UI shows the evidence behind each claim
-                "expansions": {}}
+                "expansions": {}, "frames": [], "frames_outcome": ""}
     timing_log.record(meta.get("duration", 0) / 60, was_cached, srv_ctx, timings, native,
                       predicted=predicted, warm=srv_warm, audio_mb=audio_mb)
     total = sum(timings.values())
