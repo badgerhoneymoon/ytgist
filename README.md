@@ -232,6 +232,71 @@ the sampling parameters in `model_client.py` come from its model card.
 
 ---
 
+## Local API and durable queue
+
+The existing engine serves this API at **http://127.0.0.1:8765**. It stays on loopback;
+there is no second service, account, API key, or additional dependency.
+
+Submit a JSON object to `POST /api/jobs` (or the existing `POST /api/gist`):
+
+```json
+{"url":"https://www.youtube.com/watch?v=VIDEO_ID","native":false}
+```
+
+The response remains `{"job":"…"}`. Optional fields are `model` (`dense` or `coder`),
+`native`, `refresh`, `regen`, and `shots`. The flags default to false. Invalid requests
+return HTTP 400 before enqueueing. The existing screenshot endpoint, `POST /api/frames`,
+uses the same durable queue and requires `url`, matching `video` ID, and optional `native`.
+`POST /api/expand` remains synchronous and shares the same model lock.
+
+| endpoint | purpose |
+|---|---|
+| `GET /api/jobs?limit=50` | newest jobs, with status; limit 1–100 |
+| `GET /api/jobs/JOB_ID` | request, status, cumulative progress, result or error |
+| `GET /api/jobs/JOB_ID/result` | saved final event; 409 until succeeded, 404 for unknown ID |
+| `GET /api/events?job=JOB_ID` | SSE latest progress and final result, independently for each reader |
+| `POST /api/cancel` with `{"job":"JOB_ID"}` | cancel queued or running work; returns `{"ok":true}` when accepted |
+| `GET /api/video?v=VIDEO_ID&native=0` | cache-only transcript and English summary; `native=1` selects original language |
+
+The cache-only endpoint never probes YouTube, runs a model, or creates work. It returns
+timestamped `sentences`, availability/staleness flags, and `result.raw` with the saved
+summary plus expansions and screenshots. Missing videos return 404. Invalidated cache
+versions are reported explicitly rather than exposing stale timestamps as usable output.
+
+Jobs and results live in `~/.ytgist/jobs.sqlite3` (override with `YTGIST_JOBS_DB`). A single
+dispatcher processes jobs in submission order. Summaries, screenshots, and detail requests
+still share the existing processing lock. A second engine cannot open the same job store.
+`/api/current` reports the active summary; enqueueing another video cannot replace it.
+
+Statuses are `queued`, `running`, `cancelling`, `succeeded`, `failed`, `cancelled`, and
+`interrupted`. Queued work survives engine restarts and resumes automatically. Work that
+was running when the engine stopped becomes `interrupted`; submit a new request explicitly
+to retry it. Completed results remain retrievable across restarts. Cancellation during
+processing takes effect at the pipeline's existing checkpoints; it does not undo work
+already saved to the video cache.
+
+Identical active submissions from the UI and another client share one job. For retries
+after a lost response or completed job, send an `Idempotency-Key` header of 1–200 characters.
+Reuse that key only for the same normalized request: it always returns the original job,
+including after restart, and a changed request returns 409. Use a new key to retry a failed
+or interrupted job. A submission without a key after completion creates a new job and
+uses the normal video cache. URL tracking parameters and omitted default flags do not
+create different requests.
+
+SSE sends revision IDs and cumulative progress; it supports `Last-Event-ID` and replays the
+saved terminal event to late readers. Intermediate updates may be coalesced, so use job
+status/result endpoints as the durable source of truth. Stream directly from the engine,
+not through the Next.js proxy. The UI polls its own job ID; another client's video cannot
+replace its result. It also supports the previous engine until the next safe restart.
+
+Offline regression checks (no listeners, network, model runs or subprocesses):
+
+```bash
+python3 -m unittest discover -p 'test_integration.py' -v
+```
+
+---
+
 ## Troubleshooting
 
 **`HTTP 403` on download.** YouTube refuses transiently. The app already retries three

@@ -119,7 +119,38 @@ export default function Home() {
    *  poll quietly underneath the stream so a lost frame costs nothing. */
   const settle = useCallback(async (): Promise<"done" | "running" | "gone"> => {
     try {
-      const c = await (await fetch(`${ENGINE}/api/current`)).json();
+      // Follow OUR job: another queued video may already be running when this one
+      // finishes. The global current snapshot belongs only to reload discovery.
+      // Fall back while the previous engine is still live before its next restart.
+      let c;
+      if (jobRef.current) {
+        const r = await fetch(`${ENGINE}/api/jobs/${jobRef.current}`);
+        if (r.ok) {
+          const j = await r.json();
+          if (["failed", "cancelled", "interrupted"].includes(j.status)) {
+            setError(j.error ?? "");
+            setShotBusy(false);
+            setShotMsg("");
+            shotJobRef.current = false;
+            setStage(null);
+            return "done";
+          }
+          if (j.kind === "frames" && j.status === "succeeded") {
+            const f = j.result as Frame;
+            setGist((g) => g ? {
+              ...g, framesOutcome: f.frames_outcome ?? "",
+              takeaways: g.takeaways.map((t, i) => ({ ...t, frame: f.frames?.[i] ?? t.frame })),
+            } : g);
+            setShotBusy(false);
+            setShotMsg("");
+            shotJobRef.current = false;
+            setStage(null);
+            return "done";
+          }
+          c = { job: j.id, url: j.request.url, result: j.result, frame: j.event };
+        }
+      }
+      c ??= await (await fetch(`${ENGINE}/api/current`)).json();
       if (!c?.job) return "gone";
       if (c.result) {
         const id = parseYouTube(c.url ?? "") ?? "";

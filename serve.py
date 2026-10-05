@@ -13,14 +13,14 @@ exposing it on the network would be handing strangers a downloader running as De
 import html
 import json
 import os
-import queue
 import re
 import sys
 import signal
 import threading
 import time
 import traceback
-import uuid
+from urllib.parse import parse_qs, urlparse
+from job_store import JobStore, Conflict, TERMINAL
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -105,7 +105,53 @@ def _snapshot():
     return cur
 
 PORT = int(os.environ.get("YTGIST_PORT", "8765"))
-_jobs = {}          # id → Queue of event dicts
+# Created only by the engine entry point (tests inject a temporary store).
+_store = None
+_worker_stop = threading.Event()
+
+
+class EventSink:
+    """Keep the workers' put() interface; persist and broadcast each latest event."""
+    def __init__(self, job):
+        self.job = job
+
+    def put(self, event):
+        _store.emit(self.job, event)
+        if (_store.get(self.job)["status"] == "cancelled"
+                and _current.get("job") == self.job):
+            _current.update({"job": None, "url": "", "frame": {}, "result": None, "at": 0.0})
+
+
+def _dispatch():
+    while not _worker_stop.is_set():
+        item = _store.claim()
+        if item is None:
+            with _store.changed:
+                _store.changed.wait(timeout=1)
+            continue
+        job, req = item["id"], item["request"]
+        ctl = Control()
+        _ctl[job] = ctl
+        try:
+            if _store.get(job)["status"] == "cancelling":
+                ctl.stop()
+            worker = Handler._work_frames if item["kind"] == "frames" else Handler._work
+            worker(EventSink(job), req, ctl, job)
+            # Guard against a worker returning without a terminal event.
+            if _store.get(job)["status"] not in TERMINAL:
+                _store.emit(job, {"error": "Worker ended without a result."})
+        except Exception as exc:
+            traceback.print_exc()
+            _store.emit(job, {"error": f"{type(exc).__name__}: {exc}"})
+        finally:
+            _ctl.pop(job, None)
+
+
+def _start_worker():
+    _worker_stop.clear()
+    worker = threading.Thread(target=_dispatch, daemon=True)
+    worker.start()
+    return worker
 
 
 PAGE = """<!doctype html>
@@ -328,7 +374,7 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin", "")
         if origin in ("http://127.0.0.1:3210", "http://localhost:3210"):
             self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Idempotency-Key")
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -336,7 +382,56 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
 
+    def _json(self, value, status=200):
+        body = json.dumps(value).encode()
+        self.send_response(status)
+        self._cors()
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _request(self):
+        n = int(self.headers.get("Content-Length", 0))
+        if not 0 < n <= 65536:
+            raise ValueError("A JSON object of at most 64 KiB is required.")
+        req = json.loads(self.rfile.read(n))
+        if not isinstance(req, dict):
+            raise ValueError("A JSON object is required.")
+        return req
+
     def do_GET(self):
+        path = urlparse(self.path).path
+        if path == "/api/video":
+            query = parse_qs(urlparse(self.path).query)
+            vid = (query.get("v") or [""])[0]
+            native = (query.get("native") or ["0"])[0]
+            if not re.fullmatch(r"[A-Za-z0-9_-]{11}", vid) or native not in ("0", "1"):
+                return self._json({"error": "Valid video ID and native=0 or 1 required."}, 400)
+            result = ytgist.cached_video(vid, native == "1")
+            return self._json(result if result else {"error": "Video is not cached."},
+                              200 if result else 404)
+        if path == "/api/jobs":
+            try:
+                limit = int((parse_qs(urlparse(self.path).query).get("limit") or ["50"])[0])
+                if not 1 <= limit <= 100:
+                    raise ValueError()
+            except ValueError:
+                return self._json({"error": "limit must be between 1 and 100."}, 400)
+            return self._json({"jobs": _store.list(limit)})
+        if path.startswith("/api/jobs/"):
+            pieces = path.split("/")
+            if len(pieces) not in (4, 5) or (len(pieces) == 5 and pieces[4] != "result"):
+                return self._json({"error": "Unknown endpoint."}, 404)
+            item = _store.get(pieces[3])
+            if item is None:
+                return self._json({"error": "Unknown job."}, 404)
+            if len(pieces) == 4:
+                return self._json(item)
+            if item["status"] != "succeeded":
+                return self._json({"job": item["id"], "status": item["status"],
+                                   "error": item["error"]}, 409)
+            return self._json(item["result"])
         if self.path == "/":
             body = PAGE.encode()
             self.send_response(200)
@@ -490,12 +585,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _events(self):
-        from urllib.parse import parse_qs, urlparse
         job = (parse_qs(urlparse(self.path).query).get("job") or [""])[0]
-        q = _jobs.get(job)
-        if q is None:
-            self.send_error(404)
-            return
+        if _store.get(job) is None:
+            return self.send_error(404)
+        try:
+            revision = int(self.headers.get("Last-Event-ID", "0"))
+        except ValueError:
+            return self.send_error(400)
         self.send_response(200)
         self._cors()
         self.send_header("Content-Type", "text/event-stream")
@@ -503,15 +599,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
         while True:
-            ev = q.get()
+            item = _store.wait(job, revision)
             try:
-                self.wfile.write(f"data: {json.dumps(ev)}\n\n".encode())
+                if item["revision"] > revision:
+                    revision = item["revision"]
+                    self.wfile.write(f"id: {revision}\ndata: {json.dumps(item['event'])}\n\n".encode())
+                else:
+                    self.wfile.write(b": keepalive\n\n")
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
-                break                               # the tab closed; stop writing
-            if "markdown" in ev or "error" in ev or "frames_done" in ev:
                 break
-        _jobs.pop(job, None)
+            if item["status"] in TERMINAL:
+                break
 
     def do_POST(self):
         if self.path == "/api/expand":
@@ -536,59 +635,53 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if self.path == "/api/frames":
-            # A JOB, not a blocking call like /api/expand: a screenshot pass is a loop over
-            # every takeaway with a model load in front of it, so it needs the same
-            # progress, reconnect and cancel the summary has.
-            n = int(self.headers.get("Content-Length", 0))
-            req = json.loads(self.rfile.read(n) or b"{}") or {}
-            job = uuid.uuid4().hex
-            q = queue.Queue()
-            _jobs[job] = q
-            ctl = Control()
-            _ctl[job] = ctl
-            threading.Thread(target=self._work_frames, args=(q, req, ctl, job),
-                             daemon=True).start()
-            body = json.dumps({"job": job}).encode()
-            self.send_response(200)
-            self._cors()
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
         if self.path == "/api/cancel":
-            n = int(self.headers.get("Content-Length", 0))
-            job = (json.loads(self.rfile.read(n) or b"{}") or {}).get("job", "")
-            ctl = _ctl.get(job)
-            if ctl:
-                ctl.stop()
-            body = json.dumps({"ok": bool(ctl)}).encode()
-            self.send_response(200)
-            self._cors()
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        if self.path != "/api/gist":
+            try:
+                job = self._request().get("job", "")
+                if not isinstance(job, str):
+                    raise ValueError("job must be a string.")
+            except (ValueError, TypeError) as exc:
+                return self._json({"error": str(exc)}, 400)
+            # Do not let completion hand a warm server to the next job between
+            # accepting this cancellation and stopping this job's own control.
+            with _store.changed:
+                ok = _store.cancel(job)
+                ctl = _ctl.get(job)
+                if ctl and ok:
+                    ctl.stop()
+            return self._json({"ok": ok})
+        if self.path not in ("/api/gist", "/api/frames", "/api/jobs"):
             return self.send_error(404)
-        n = int(self.headers.get("Content-Length", 0))
-        req = json.loads(self.rfile.read(n) or b"{}")
-        job = uuid.uuid4().hex
-        q = queue.Queue()
-        _jobs[job] = q
-        ctl = Control()
-        _ctl[job] = ctl
-        _publish(job, req.get("url", ""), "", bool(req.get("native")))
-        threading.Thread(target=self._work, args=(q, req, ctl, job), daemon=True).start()
-        body = json.dumps({"job": job}).encode()
-        self.send_response(200)
-        self._cors()
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            req = self._request()
+            kind = "frames" if self.path == "/api/frames" else "gist"
+            if not isinstance(req.get("url"), str):
+                raise ValueError("url must be a YouTube URL.")
+            vid = ytgist.yt.video_id(req["url"])
+            normalized = {"url": f"https://www.youtube.com/watch?v={vid}",
+                          "native": bool(req.get("native", False))}
+            for flag in ("native", "refresh", "regen", "shots"):
+                if flag in req and not isinstance(req[flag], bool):
+                    raise ValueError(f"{flag} must be a boolean.")
+            if kind == "frames":
+                if req.get("video") != vid:
+                    raise ValueError("video must match the URL's video ID.")
+                normalized["video"] = vid
+            else:
+                model = req.get("model", "dense")
+                if not isinstance(model, str) or model not in ytgist.MODELS:
+                    raise ValueError("Unknown model.")
+                normalized.update({"model": model, **{key: req.get(key, False)
+                                   for key in ("refresh", "regen", "shots")}})
+            idem = self.headers.get("Idempotency-Key")
+            if idem is not None and (not idem.strip() or len(idem) > 200):
+                raise ValueError("Idempotency-Key must contain 1–200 characters.")
+            item, created = _store.submit(kind, normalized, idem)
+        except Conflict as exc:
+            return self._json({"error": str(exc)}, 409)
+        except (ValueError, TypeError, ytgist.yt.IngestError) as exc:
+            return self._json({"error": str(exc)}, 400)
+        return self._json({"job": item["id"]})
 
     @staticmethod
     def _work_frames(q, req, ctl=None, job=None):
@@ -604,14 +697,20 @@ class Handler(BaseHTTPRequestHandler):
                        "msg": "another job is running — waiting for the model"})
                 _RUN.acquire()
             try:
+                if ctl and ctl.cancelled.is_set():
+                    raise ytgist.Cancelled()
                 decisions, outcome = ytgist.find_frames(
                     req.get("url", ""), req.get("video", ""),
                     native=bool(req.get("native")),
                     progress=lambda f: q.put(f), control=ctl)
+                if ctl and ctl.cancelled.is_set():
+                    raise ytgist.Cancelled()
                 q.put({"frames": decisions, "frames_outcome": outcome, "frames_done": True})
                 # The saved summary now carries the frames; a rejoining page reads the
                 # snapshot, so it has to carry them too or a reload shows an empty result.
-                if isinstance(_current.get("result"), dict):
+                if (_current.get("video") == req.get("video")
+                        and _current.get("native") == bool(req.get("native"))
+                        and isinstance(_current.get("result"), dict)):
                     _current["result"]["frames"] = decisions
                     _current["result"]["frames_outcome"] = outcome
             finally:
@@ -626,11 +725,18 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _work(q, req, ctl=None, job=None):
+        acquired = False
         try:
             if not _RUN.acquire(blocking=False):
                 q.put({"stage": "summarise", "pct": 5,
                        "msg": "another summary is running — waiting for the model"})
                 _RUN.acquire()
+            if ctl and ctl.cancelled.is_set():
+                _RUN.release()
+                raise ytgist.Cancelled()
+            acquired = True
+            _publish(job, req.get("url", ""), ytgist.yt.video_id(req.get("url", "")),
+                     bool(req.get("native")))
             # HEARTBEAT. Summarising emits nothing until it is finished — 183s on a
             # 57-minute video — and the browser cannot tell a working engine from a dead
             # one during silence, so its watchdog declared a perfectly healthy run dead
@@ -683,8 +789,9 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 stop.set()
                 sampler.stop()
-                _RUN.release()
             res = getattr(ytgist.run, "last", None)
+            if ctl and ctl.cancelled.is_set():
+                raise ytgist.Cancelled()
             # BELONGS TO THIS JOB, or it is not a result. Clearing run.last up front should
             # make this impossible; checking anyway costs one comparison and the failure it
             # guards against is serving one video's summary under another video's title.
@@ -727,6 +834,8 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             q.put({"error": f"{type(e).__name__}: {e}"})
         finally:
+            if acquired:
+                _RUN.release()
             # A job that ends WITHOUT a result — stopped, refused, crashed — must leave no
             # trace in the snapshot, or a reload resurrects the view of work that is not
             # happening: press Stop, reload, and the bar carries on summarising something
@@ -738,6 +847,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     def _bye(*_):
+        _worker_stop.set()  # Leave pending jobs on disk for the next engine start.
         # GRACEFUL. A summary that is mid-generation when the engine is killed is simply
         # lost — the transcript survives, but the model time does not, and the next click
         # silently pays for it again. That is almost certainly what happened when a restart
@@ -756,6 +866,9 @@ if __name__ == "__main__":
         signal.signal(_sig, _bye)
 
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    # Bind first: a second engine cannot open/recover the live engine's job database.
+    _store = JobStore(os.environ.get("YTGIST_JOBS_DB", os.path.expanduser("~/.ytgist/jobs.sqlite3")))
+    _start_worker()
     print(f"ytgist → http://127.0.0.1:{PORT}   (ctrl-c to stop)")
     try:
         srv.serve_forever()

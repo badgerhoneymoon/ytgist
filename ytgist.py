@@ -521,6 +521,43 @@ def save_summary(vid, payload, native=False):
     os.replace(tmp, gist_path(vid, native))
 
 
+def cached_video(vid, native=False):
+    """Read-only retrieval. Never probe YouTube, sweep files, or acquire a model.
+
+    Report invalidated cache versions explicitly; do not present stale timestamps or
+    a summary whose prompt version is no longer current as a usable result.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", vid or ""):
+        raise ValueError("Invalid video ID.")
+    transcript = load_cached(vid)
+    summary = load_summary(vid, native)
+    transcript_exists = os.path.isfile(_cache_path(vid))
+    summary_exists = os.path.isfile(gist_path(vid, native))
+    if not transcript_exists and not summary_exists:
+        return None
+    # The summary cites the transcript, so both must be current to expose a result.
+    result = None
+    if transcript and summary:
+        sentences = transcript.get("sentences") or []
+        result = {"title": summary.get("title") or transcript.get("title", ""),
+                  "raw": summary["text"], "sentences": sentences,
+                  "duration": transcript.get("duration", 0), "cached": True,
+                  "expansions": summary.get("expansions") or {},
+                  "frames": (summary.get("frames") or []
+                             if summary.get("frames_v") == FRAMES_V else []),
+                  "frames_outcome": (summary.get("frames_outcome") or ""
+                                     if summary.get("frames_v") == FRAMES_V else "")}
+    return {"video": vid, "native": bool(native),
+            "title": (transcript or summary or {}).get("title", vid),
+            "duration": (transcript or summary or {}).get("duration", 0),
+            "transcript_available": bool(transcript),
+            "summary_available": bool(result),
+            "transcript_stale": transcript_exists and not bool(transcript),
+            "summary_stale": summary_exists and not bool(summary),
+            "sentences": (transcript or {}).get("sentences") or [],
+            "result": result}
+
+
 # The 25 commonest English function words. Script alone cannot answer this — Spanish and
 # French are Latin too — but function words are the highest-frequency, least topic-
 # dependent signal there is, and a transcript is long enough to make the ratio stable.
