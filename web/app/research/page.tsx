@@ -22,7 +22,7 @@ type Step = {
 };
 type Run = {
   id: string; topic: string; status: string; msg: string; created: number;
-  picks: Pick[]; error?: string | null; searched?: number;
+  picks: Pick[]; error?: string | null; searched?: number; queries?: string[];
   report?: {
     markdown: string; sources: Source[]; at: number; unverified_dropped: number;
     tldr?: string; takeaways?: Step[]; extras?: string;
@@ -309,6 +309,14 @@ export default function ResearchPage() {
                  className="shrink-0 text-[13px] text-soft hover:text-accent">Open as page ↗</a>
             )}
           </div>
+
+          {run.queries && run.queries.length > 1 && (
+            <p className="mt-2 text-[12.5px] leading-[1.5] text-soft">
+              Searched YouTube for {run.queries.map((q, i) => (
+                <span key={i}>{i > 0 && " · "}<span className="text-body">{q}</span></span>
+              ))}{run.searched ? ` — ${run.searched} videos found` : ""}
+            </p>
+          )}
 
           {run.status !== "done" && (
             <div className="mt-5">

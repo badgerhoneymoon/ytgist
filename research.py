@@ -199,10 +199,16 @@ def _run(rid, stop):
 
     def say(status=None, msg=None):
         nonlocal r
-        fresh = load(rid) or r            # drop() writes picks from another thread
+        # drop() writes picks from another thread, so the file wins for picks; this thread's
+        # own fields (queries, how many were found) win over the file.
+        fresh = load(rid) or {}
+        merged = {**r, **fresh}
         if r.get("picks") and not fresh.get("picks"):
-            fresh["picks"] = r["picks"]
-        r = fresh
+            merged["picks"] = r["picks"]
+        for k in ("queries", "searched"):
+            if k in r:
+                merged[k] = r[k]
+        r = merged
         if status:
             r["status"] = status
         if msg is not None:
@@ -212,9 +218,12 @@ def _run(rid, stop):
     try:
         with shed.hold("YouTube research: " + r["topic"][:40],
                        wait_msg=lambda t: say(msg=t), cancelled=stop.is_set):
-            cands = search(r["topic"])
-            say(msg=f"Found {len(cands)} videos. Choosing {r['n']}")
+            say(msg="Working out what to search for")
+            r["queries"] = queries_for(r["topic"], stop)
+            say(msg=f"Searching YouTube {len(r['queries'])} ways")
+            cands = search_all(r["queries"])
             r["searched"] = len(cands)
+            say(msg=f"Found {len(cands)} videos. Choosing {r['n']}")
             if len(cands) < 2:
                 raise RuntimeError("YouTube returned almost nothing for that topic. Try other words.")
             say(status="picking")
@@ -248,10 +257,49 @@ def _run(rid, stop):
                 _active.update(id=None, stop=None)
 
 
-def search(topic):
+QUERY_SYSTEM = """You turn a research topic into YouTube search queries.
+Write 3 different queries that together find the best videos on it: one close to the topic,
+one with the words an expert or practitioner would use, one aimed at a different angle
+(a comparison, a deep dive, a common mistake, a specific tool). Same language as the topic.
+Answer with JSON only: {"queries": ["...", "...", "..."]}"""
+
+
+def queries_for(topic, stop=None):
+    """The topic as typed, plus three rewrites by the model. A single YouTube search only sees
+    what YouTube ranks for that exact phrase (Denis, 7 Oct); pooling several finds more."""
+    out = [topic]
+    try:
+        with (_run_lock or threading.Lock()):
+            if stop is not None and stop.is_set():
+                raise InterruptedError
+            with model_client.Server.acquire(2000, log=lambda *_: None) as srv:
+                raw = srv.chat(QUERY_SYSTEM, f"Topic: {topic}", max_tokens=200, temperature=0.4)
+        m = re.search(r"\{.*\}", raw, re.S)
+        for q in (json.loads(m.group(0)).get("queries") if m else []) or []:
+            q = " ".join(str(q).split())[:120]
+            if q and q.lower() not in [x.lower() for x in out]:
+                out.append(q)
+    except (model_client.ModelError, ValueError, TypeError) as e:
+        ytgist.log(f"  research: no query rewrites ({e}); searching the topic as typed")
+    return out[:4]
+
+
+def search_all(queries):
+    """Every query's results, pooled: a video found by several queries ranks by its best
+    position, and the pool is interleaved so no single query crowds out the others."""
+    pooled = {}
+    for qi, q in enumerate(queries):
+        for c in search(q, per=SEARCH_N if qi == 0 else 25):
+            old = pooled.get(c["id"])
+            if old is None or c["rank"] < old["rank"]:
+                pooled[c["id"]] = {**c, "query": qi}
+    return sorted(pooled.values(), key=lambda c: (c["rank"], c["query"]))[:48]
+
+
+def search(topic, per=SEARCH_N):
     """yt-dlp's YouTube search, metadata only. Nothing is downloaded here."""
     rc, out, err = yt._run(["yt-dlp", "--ignore-config", "--flat-playlist", "-J",
-                            f"ytsearch{SEARCH_N}:{topic}"], timeout=90)
+                            f"ytsearch{per}:{topic}"], timeout=90)
     if rc != 0:
         raise yt.IngestError(*yt._classify(err))
     cap = min(MAX_SECONDS, ytgist.max_minutes() * 60)
@@ -615,6 +663,10 @@ def page(r):
            + ("<meta http-equiv=refresh content=5>" if live else "") + "<main>",
            f"<div class=k>YouTube research · {time.strftime('%d %b %Y', time.localtime(r['created']))}</div>",
            f"<h1>{H.escape(r['topic'])}</h1>"]
+    if len(r.get("queries") or []) > 1:
+        out.append("<div class=k style='text-transform:none;letter-spacing:0'>Searched YouTube for "
+                   + " · ".join(H.escape(q) for q in r["queries"])
+                   + (f" — {r['searched']} videos found" if r.get("searched") else "") + "</div>")
     picks = [p for p in r.get("picks", []) if p["status"] != "dropped"]
     if live or r["status"] != "done":
         done = len([p for p in picks if p["status"] == "succeeded"])
