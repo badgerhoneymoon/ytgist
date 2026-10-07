@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
+import { Check, Clock, Loader2, X } from "lucide-react";
 import { ENGINE, ON_PC } from "../engine";
 import { Shot } from "../Result";
 
@@ -167,9 +168,21 @@ function Extras({ md }: { md: string }) {
   );
 }
 
-const STATUS: Record<string, string> = {
-  queued: "queued", running: "working…", succeeded: "done", failed: "failed", dropped: "left out",
-};
+/** Where each video is, readable at a glance: an icon, a word, a tinted pill (Denis, 7 Oct). */
+function Status({ s }: { s: string }) {
+  const look: Record<string, [string, ReactNode, string]> = {
+    succeeded: ["Done", <Check key="i" size={13} strokeWidth={3} />, "bg-good/12 text-good"],
+    running: ["Working", <Loader2 key="i" size={13} strokeWidth={2.5} className="animate-spin" />, "bg-accent/12 text-accent"],
+    queued: ["Queued", <Clock key="i" size={13} strokeWidth={2.5} />, "bg-ink/[0.06] text-soft"],
+    failed: ["Failed", <X key="i" size={13} strokeWidth={3} />, "bg-accent/15 text-accent"],
+  };
+  const [word, icon, cls] = look[s] ?? [s, null, "bg-ink/[0.06] text-soft"];
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12.5px] font-semibold ${cls}`}>
+      {icon}{word}
+    </span>
+  );
+}
 
 export default function ResearchPage() {
   const [topic, setTopic] = useState("");
@@ -322,11 +335,19 @@ export default function ResearchPage() {
           </div>
 
           {run.queries && run.queries.length > 1 && (
-            <p className="mt-2 text-[12.5px] leading-[1.5] text-soft">
-              Searched YouTube for {run.queries.map((q, i) => (
-                <span key={i}>{i > 0 && " · "}<span className="text-body">{q}</span></span>
-              ))}{run.searched ? ` — ${run.searched} videos found` : ""}
-            </p>
+            <div className="mt-4">
+              <p className="text-[11.5px] font-semibold uppercase tracking-[0.1em] text-soft">
+                Searched YouTube {run.queries.length} ways{run.searched ? ` · ${run.searched} videos found` : ""}
+              </p>
+              <ol className="mt-2 list-decimal space-y-1 pl-5 text-[14px] leading-[1.45] text-body marker:text-soft">
+                {run.queries.map((q, i) => (
+                  <li key={i} className="pl-1">
+                    {q}
+                    {i === 0 && <span className="ml-2 text-[12px] text-soft">as you typed</span>}
+                  </li>
+                ))}
+              </ol>
+            </div>
           )}
 
           {run.status !== "done" && (
@@ -366,7 +387,7 @@ export default function ResearchPage() {
               <div className="space-y-2">
                 {rows.map((p) => (
                   <div key={p.id}
-                       className="grid grid-cols-[2.2rem_minmax(0,1fr)_auto] items-baseline gap-3 rounded-xl border border-line bg-white/50 px-4 py-3">
+                       className="grid grid-cols-[2.2rem_minmax(0,1fr)_auto] items-center gap-3 rounded-xl border border-line bg-white/50 px-4 py-3">
                     <span className="font-mono text-[12px] text-soft">V{p.k}</span>
                     <span className="min-w-0">
                       <a href={`https://youtu.be/${p.id}`} target="_blank" rel="noopener noreferrer"
@@ -377,11 +398,7 @@ export default function ResearchPage() {
                       </span>
                     </span>
                     <span className="flex items-center gap-3 whitespace-nowrap text-[12.5px]">
-                      {!run.report && (
-                        <span className={p.status === "succeeded" ? "text-good" : p.status === "failed" ? "text-accent" : "text-soft"}>
-                          {STATUS[p.status] || p.status}
-                        </span>
-                      )}
+                      {!run.report && <Status s={p.status} />}
                       {live && p.status !== "succeeded" && (
                         <button title="leave this video out"
                                 onClick={() => post(`/api/research/${run.id}/drop`, { video: p.id })}
