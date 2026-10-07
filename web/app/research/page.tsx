@@ -16,7 +16,10 @@ type Pick = {
 };
 type Source = { k: number; id: string; title: string; channel: string; duration: number };
 type Cite = { k: number; id: string; secs: number | null; stamp: string | null };
-type Step = { headline: string; body: string; cites: Cite[]; said: { k: number; stamp: string; text: string }[] };
+type Step = {
+  headline: string; body: string; cites: Cite[]; said: { k: number; stamp: string; text: string }[];
+  shot?: { k: number; id: string; secs: number } | null;
+};
 type Run = {
   id: string; topic: string; status: string; msg: string; created: number;
   picks: Pick[]; error?: string | null; searched?: number;
@@ -111,6 +114,14 @@ function StepView({ n, t }: { n: number; t: Step }) {
       <div className="col-start-2 max-sm:col-start-1">
         <h3 className="text-[19.5px] font-semibold leading-[1.28] tracking-[-0.006em] text-ink">{t.headline}</h3>
         <p className="prose-serif mt-3 font-serif text-[19px] leading-[1.6] text-body">{t.body}</p>
+        {t.shot && (
+          <a href={`https://youtu.be/${t.shot.id}?t=${t.shot.secs}`} target="_blank" rel="noopener noreferrer"
+             title={`V${t.shot.k}: open at this moment`} className="mt-4 block w-fit">
+            {/* A plain <img>: served by the engine on another host, which next/image would need configuring for. */}
+            <img src={`${ENGINE}/api/frame?v=${t.shot.id}&t=${t.shot.secs}`} alt={`V${t.shot.k} at this moment`}
+                 className="max-h-[16rem] w-auto max-w-full rounded-lg border border-line" loading="lazy" />
+          </a>
+        )}
         {t.said.length > 0 && (
           <div>
             <button onClick={() => setOpen((v) => !v)} aria-expanded={open}
@@ -170,6 +181,7 @@ export default function ResearchPage() {
   const [run, setRun] = useState<Run | null>(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [shots, setShots] = useState(true);
 
   const loadRuns = useCallback(async () => {
     try {
@@ -216,7 +228,7 @@ export default function ResearchPage() {
     try {
       const r = await fetch(`${ENGINE}/api/research`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic: topic.trim(), n: 10 }),
+        body: JSON.stringify({ topic: topic.trim(), n: 10, shots }),
       });
       const d = await r.json();
       if (d.error) setErr(d.error);
@@ -277,6 +289,11 @@ export default function ResearchPage() {
           Research
         </button>
       </form>
+      <label className="mt-3 flex w-fit items-center gap-2 text-[13.5px] text-soft">
+        <input type="checkbox" checked={shots} onChange={(e) => setShots(e.target.checked)} disabled={live || busy}
+               className="h-3.5 w-3.5 accent-[var(--color-accent)]" />
+        Look for a screenshot for each takeaway (about a minute more per video)
+      </label>
       {err && <p className="mt-3 text-[13.5px] text-accent">{err}</p>}
 
       {run && (

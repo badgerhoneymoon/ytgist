@@ -110,7 +110,7 @@ def attach(store, run_lock=None, cancel_job=None):
 
 
 # ------------------------------------------------------------------------- start
-def start(topic, n=10, native=False):
+def start(topic, n=10, native=False, shots=True):
     topic = " ".join(str(topic or "").split())
     if not 3 <= len(topic) <= 200:
         raise ValueError("Give a topic of 3–200 characters.")
@@ -121,7 +121,8 @@ def start(topic, n=10, native=False):
             if cur and cur["status"] in ACTIVE:
                 raise Busy(f"Already researching “{cur['topic']}”. Stop it or wait.")
         rid = uuid.uuid4().hex[:12]
-        r = {"id": rid, "topic": topic, "n": n, "native": bool(native), "status": "searching",
+        r = {"id": rid, "topic": topic, "n": n, "native": bool(native), "shots": bool(shots),
+             "status": "searching",
              "msg": "Searching YouTube", "created": time.time(), "picks": [], "report": None,
              "error": None, "searched": 0}
         _save(r)
@@ -327,7 +328,7 @@ def _gist_all(rid, stop, say):
         if p["status"] == "dropped":
             continue
         req = {"url": f"https://www.youtube.com/watch?v={p['id']}", "native": r["native"],
-               "model": "dense", "refresh": False, "regen": False, "shots": False}
+               "model": "dense", "refresh": False, "regen": False, "shots": bool(r.get("shots"))}
         item, _ = _store.submit("gist", req, f"research-{rid}-{p['id']}")
         p["job"] = item["id"]
     _save(r)
@@ -393,6 +394,8 @@ Rules:
   shape of the answer. Combine what several videos say into one takeaway; do not go video by video.
 - Every takeaway and every point cites at least one source as [V<k> <mm:ss>], with a
   timestamp that appears in that video's summary. Put the citations right after the headline.
+- The extra sections are lists, not one line each: 3-6 points under "Where they agree",
+  1-4 under "Where they disagree", 2-5 under "Only one of them says" - as many as are real.
 - Use only what the summaries say. Write "Nothing worth noting." under a section with
   nothing real in it. Exactly 3 videos under "Watch first"."""
 
@@ -454,12 +457,33 @@ def combine(r, stop=None):
                 raise RuntimeError("Too much to combine in one pass; try fewer videos.")
             raw = srv.chat(COMBINE_SYSTEM.format(lang=lang, steps=steps), user,
                            max_tokens=4200, temperature=0.3)
-    return _structure(raw, sources, stamps)
+    return _structure(raw, sources, stamps, r["native"])
 
 
-def _structure(raw, sources, stamps):
+_HEAD_STAMP = re.compile(r"^\s*\d+[.)]\s+\*\*.*?\*\*\s*\[(\d{1,2}:\d{2}(?::\d{2})?)\]", re.M)
+
+
+def _shots_for(source, native):
+    """{moment a takeaway of this video cites: the second of the screenshot found for it}.
+
+    A video's own screenshot pass already looked at each of ITS takeaways and kept a frame
+    only where one matched; a research takeaway citing that same verified moment can show
+    the same picture. Nothing is looked at again, and nothing is guessed."""
+    g = ytgist.load_summary(source["id"], native) or {}
+    if g.get("frames_v") != ytgist.FRAMES_V:
+        return {}
+    heads = [_secs(t) for t in _HEAD_STAMP.findall(_digest(g.get("text", "")))]
+    out = {}
+    for secs, f in zip(heads, g.get("frames") or []):
+        if f and f.get("state") == "found":
+            out[secs] = f["secs"]
+    return out
+
+
+def _structure(raw, sources, stamps, native=False):
     """The model's text → TL;DR, takeaways and extras, with every citation checked."""
     by_k = {s["k"]: s for s in sources}
+    shots = {s["k"]: _shots_for(s, native) for s in sources}
     dropped = [0]
 
     def cites_in(text):
@@ -516,9 +540,11 @@ def _structure(raw, sources, stamps):
             cites = cites_in(head + " " + text)
             said = [{"k": c["k"], "stamp": c["stamp"], "text": _said(c["id"], c["secs"])}
                     for c in cites if c["secs"] is not None][:2]
+            shot = next(({"k": c["k"], "id": c["id"], "secs": shots[c["k"]][c["secs"]]}
+                         for c in cites if c["secs"] is not None and c["secs"] in shots.get(c["k"], {})), None)
             takeaways.append({"headline": _CITE.sub("", head).strip(" ."),
                               "body": re.sub(r"\s{2,}", " ", _CITE.sub("", text)).strip(),
-                              "cites": cites, "said": [s for s in said if s["text"]]})
+                              "cites": cites, "said": [s for s in said if s["text"]], "shot": shot})
     extras_md = "\n".join(extras).strip()
     md = "\n\n".join([f"TL;DR {tldr}"] + [
         f"{n}. **{t['headline']}** " + " ".join(
@@ -575,6 +601,7 @@ ol{padding-left:22px}li{margin:0 0 14px}a{color:var(--accent);text-decoration:no
 details summary{cursor:pointer;color:var(--mute);font-size:13px;margin-top:10px}blockquote{margin:8px 0 0;padding:10px 14px;border-left:2px solid var(--line);
  background:var(--card);font:15.5px/1.5 Georgia,"PT Serif",serif}.extra{border-top:1px solid var(--line);padding:4px 0 8px}
 .extra summary{font:600 16px -apple-system,sans-serif;color:var(--ink);margin:12px 0}.extra ol{padding-left:22px}
+.shot{display:block;max-width:100%;width:420px;border-radius:10px;margin-top:12px;border:1px solid var(--line)}
 """
 
 
@@ -618,7 +645,10 @@ def page(r):
                 for c in t["cites"])
             said = "".join(f"<blockquote><span class=k>V{s['k']} · {s['stamp']}</span> {H.escape(s['text'])}…</blockquote>"
                            for s in t["said"])
-            out.append(f"<li><div class=n>{n}</div><div><h3>{H.escape(t['headline'])}</h3><p>{H.escape(t['body'])}</p>"
+            sh = t.get("shot")
+            pic = (f"<a href='https://youtu.be/{sh['id']}?t={sh['secs']}' target=_blank rel=noopener>"
+                   f"<img class=shot src='/api/frame?v={sh['id']}&t={sh['secs']}' alt='V{sh['k']} at {_stamp(sh['secs'])}'></a>") if sh else ""
+            out.append(f"<li><div class=n>{n}</div><div><h3>{H.escape(t['headline'])}</h3><p>{H.escape(t['body'])}</p>{pic}"
                        f"<div class=chips>{chips}</div>"
                        + (f"<details open><summary>what was said</summary>{said}</details>" if said else "")
                        + "</div></li>")

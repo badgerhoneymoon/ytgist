@@ -673,7 +673,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/research":
             try:
                 req = self._request()
-                rid = research.start(req.get("topic", ""), req.get("n", 10), bool(req.get("native")))
+                rid = research.start(req.get("topic", ""), req.get("n", 10), bool(req.get("native")),
+                                     bool(req.get("shots", True)))
             except research.Busy as exc:
                 return self._json({"error": str(exc)}, 409)
             except (ValueError, TypeError) as exc:
