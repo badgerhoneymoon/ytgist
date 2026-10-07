@@ -191,12 +191,11 @@ def _run(rid, stop):
                 raise InterruptedError
             say(status="combining", msg="Writing the combined brief")
             r = load(rid)
-            report = combine(r, stop)
-            r["report"] = report
+            r["report"] = combine(r, stop)
+            r["finished"] = time.time()
+            _save(r)                     # before say(): say() re-reads the file
             _write_markdown(r)
             say(status="done", msg="")
-            r["finished"] = time.time()
-            _save(r)
     except InterruptedError:
         for p in (load(rid) or r).get("picks", []):
             if p.get("job") and p["status"] in ("queued", "running") and _cancel_job:

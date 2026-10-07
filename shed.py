@@ -121,6 +121,12 @@ def hold(task, wait_msg=None, cancelled=None):
             except Exception:
                 pass
             try:
+                import sys
+                if "ytgist" in sys.modules:
+                    sys.modules["ytgist"].asr_unload()   # nor Parakeet
+            except Exception:
+                pass
+            try:
                 _call("POST", "/api/gpu/release", {"who": WHO})
             except OSError:
                 pass

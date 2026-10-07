@@ -449,7 +449,7 @@ EXP_V = 2           # bump when the EXPAND PROMPT changes; older expansions are 
                     # written before the rule existed (2026-08-08)
 
 MODELS = {
-    "dense": os.path.expanduser("~/models/Qwen3.6-27B-UD-Q5_K_XL.gguf"),
+    "dense": model_client.MODEL,          # YTGIST_MODEL, or ~/models/Qwen3.6-27B-UD-Q5_K_XL.gguf
     "coder": os.path.expanduser(
         "~/.cache/huggingface/hub/models--unsloth--Qwen3-Coder-Next-GGUF/blobs/"
         "abf56d7fe8a0a99c15d220c13de4aa57b69cfba6ef4c2a007b56e34d7b40cd11"),
@@ -639,9 +639,16 @@ _nemo_lock = __import__("threading").Lock()
 _SENT_END = re.compile(r"[.!?…。！？][\"')\]]*$")
 
 
-def _nemo_release():
+def asr_unload():
+    """Let go of Parakeet now (the GPU booking is being released)."""
+    _nemo_release(force=True)
+
+
+def _nemo_release(force=False):
     with _nemo_lock:
-        if _nemo["m"] is None or _nemo["busy"] or time.time() - _nemo["last"] < NEMO_IDLE - 1:
+        if _nemo["m"] is None or _nemo["busy"]:
+            return
+        if not force and time.time() - _nemo["last"] < NEMO_IDLE - 1:
             return
         _nemo["m"] = None
     import gc
