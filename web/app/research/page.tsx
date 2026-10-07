@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { Check, Clock, Loader2, X } from "lucide-react";
+import { Check, Clock, Copy, Loader2, X } from "lucide-react";
 import { ENGINE, ON_PC } from "../engine";
 import { Shot } from "../Result";
 
@@ -169,6 +169,49 @@ function Extras({ md }: { md: string }) {
 }
 
 /** Where each video is, readable at a glance: an icon, a word, a tinted pill (Denis, 7 Oct). */
+/** Copy the whole brief as Markdown, to paste into another AI. It is the engine's own .md
+ *  (the same file "Open as page" is built from): TL;DR, takeaways with timestamp links,
+ *  quotes, the extras and the source list. Fetched ahead of the click, because Safari only
+ *  lets a page write the clipboard straight from the click; a fetch in between can lose it.
+ *  Keyed on the report's time by the caller, so a rewritten brief is fetched again.
+ */
+function CopyBrief({ id }: { id: string }) {
+  const [md, setMd] = useState<string | null>(null);
+  const [state, setState] = useState<"idle" | "done" | "failed">("idle");
+
+  useEffect(() => {
+    let alive = true;
+    fetch(`${ENGINE}/research/${id}.md`)
+      .then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status)))))
+      .then((t) => { if (alive) setMd(t); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [id]);
+
+  const copy = async () => {
+    try {
+      const text: string = md !== null ? md : await (await fetch(`${ENGINE}/research/${id}.md`)).text();
+      await navigator.clipboard.writeText(text);
+      setState("done");
+    } catch {
+      setState("failed");
+    }
+    setTimeout(() => setState("idle"), 2000);
+  };
+
+  return (
+    <button onClick={copy} title="The whole brief as Markdown, with links to every moment"
+            className="group inline-flex items-center gap-1.5 text-[13px] text-soft hover:text-accent">
+      {state === "done"
+        ? <Check size={13} strokeWidth={2.5} className="text-good" />
+        : <Copy size={13} strokeWidth={2} />}
+      <span className={state === "done" ? "font-medium text-good" : ""}>
+        {state === "done" ? "Copied" : state === "failed" ? "Couldn't copy" : "Copy text"}
+      </span>
+    </button>
+  );
+}
+
 function Status({ s }: { s: string }) {
   const look: Record<string, [string, ReactNode, string]> = {
     succeeded: ["Done", <Check key="i" size={13} strokeWidth={3} />, "bg-good/12 text-good"],
@@ -329,8 +372,11 @@ export default function ResearchPage() {
                       className="shrink-0 text-[13px] text-soft hover:text-accent">Stop</button>
             )}
             {run.report && (
-              <a href={`${ENGINE}/research/${run.id}`} target="_blank" rel="noopener noreferrer"
-                 className="shrink-0 text-[13px] text-soft hover:text-accent">Open as page ↗</a>
+              <div className="flex shrink-0 items-center gap-4">
+                <CopyBrief key={`${run.id}-${run.report.at}`} id={run.id} />
+                <a href={`${ENGINE}/research/${run.id}`} target="_blank" rel="noopener noreferrer"
+                   className="text-[13px] text-soft hover:text-accent">Open as page ↗</a>
+              </div>
             )}
           </div>
 
