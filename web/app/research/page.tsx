@@ -292,7 +292,7 @@ export default function ResearchPage() {
       <label className="mt-3 flex w-fit items-center gap-2 text-[13.5px] text-soft">
         <input type="checkbox" checked={shots} onChange={(e) => setShots(e.target.checked)} disabled={live || busy}
                className="h-3.5 w-3.5 accent-[var(--color-accent)]" />
-        Look for a screenshot for each takeaway (about a minute more per video)
+        Look for a screenshot for each takeaway (about 2 minutes more per video)
       </label>
       {err && <p className="mt-3 text-[13.5px] text-accent">{err}</p>}
 
