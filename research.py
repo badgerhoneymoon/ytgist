@@ -206,7 +206,7 @@ def _run(rid, stop):
         merged = {**r, **fresh}
         if r.get("picks") and not fresh.get("picks"):
             merged["picks"] = r["picks"]
-        for k in ("queries", "searched", "wider_at", "subject"):
+        for k in ("queries", "searched", "wider_at", "subject", "error"):
             if k in r:
                 merged[k] = r[k]
         r = merged
@@ -306,7 +306,7 @@ def queries_for(topic, stop=None, tried=None):
             if stop is not None and stop.is_set():
                 raise InterruptedError
             with model_client.Server.acquire(2000, log=lambda *_: None) as srv:
-                raw = srv.chat(system, user, max_tokens=200, temperature=0.4)
+                raw = srv.chat(system, user, max_tokens=200, temperature=0.0)   # same topic, same searches
         m = re.search(r"\{.*\}", raw, re.S)
         for q in (json.loads(m.group(0)).get("queries") if m else []) or []:
             q = " ".join(str(q).split())[:120]
@@ -355,22 +355,22 @@ def search(topic, per=SEARCH_N):
 
 
 PICK_SYSTEM = """You judge YouTube search results for someone researching a topic.
-First split the topic into its SUBJECT (the core thing a video must be about, in a few words)
-and its DETAILS (audience, place, platform, budget...). Then score EVERY numbered result by
-its title and description:
-3 = about the subject and its details
-2 = about the subject with one detail loosened (another platform, market or audience, or a
-    similar product); it still answers part of the question directly
+First split the topic into its SUBJECT (the core thing a video must be about, in a few words,
+with no audience, place or platform in it) and its DETAILS (audience, place, platform,
+budget...). Then score EVERY numbered result by its title and description:
+3 = about the subject and matching its details
+2 = about the subject, with some details different or missing (another platform, market or
+    audience, or a similar product); it still answers part of the question directly
 1 = only near it: general advice from the wider field, product reviews, lists of ideas,
     business basics that never touch the subject
 0 = another subject, or a reaction video, compilation, music, trailer or clickbait
-Be strict: when unsure between two scores, give the lower one. When several results say the
+When several results say the
 same thing from the same angle (the same tutorial from different channels), score only the
 best of them 2 or 3 and the rest 1: the picks should cover different parts of the question.
 Also say whether the topic depends on things that change fast (tools, AI models, versions,
 prices, platforms, ad rules, algorithms).
 Answer with JSON only:
-{"subject": "<the subject, without the details>", "changes": true or false,
+{"subject": "<the subject, without the details>", "details": ["..."], "changes": true or false,
  "scores": [{"n": <number>, "s": <0-3>, "why": "<under 12 words, only when s is 2 or 3>"}]}"""
 
 OLD_YEARS, TOO_OLD_YEARS = 2, 3   # for fast-changing topics: sorted last / left out
@@ -408,7 +408,7 @@ def pick(topic, cands, n, stop=None):
             if stop is not None and stop.is_set():
                 raise InterruptedError
             with model_client.Server.acquire(len(user) // 2 + budget + 600, log=lambda *_: None) as srv:
-                raw = srv.chat(PICK_SYSTEM, user, max_tokens=budget, temperature=0.1)
+                raw = srv.chat(PICK_SYSTEM, user, max_tokens=budget, temperature=0.0)   # same pool, same picks
         m = re.search(r"\{.*\}", raw, re.S)
         data = json.loads(m.group(0)) if m else {}
         subject = " ".join(str(data.get("subject") or "").split())[:80]
@@ -618,6 +618,78 @@ def _shots_for(source, native):
     return out
 
 
+SUPPORT_SYSTEM = """You check the citations in a research brief.
+Each numbered item has a CLAIM (one takeaway from the brief) and a QUOTE (what one video says
+at the moment the claim cites, taken from its transcript). For each item, decide whether the
+quote BACKS the claim: it has to talk about the claim's own subject and state at least one of
+its facts or arguments. A quote from the same video about a different aspect (speed instead of
+power, setup instead of cost, a demo instead of a comparison) does NOT back it, and neither does
+a quote that only shares a word with the claim.
+Answer with JSON only, one entry per item, the reason first:
+{"items": [{"n": 1, "why": "<under 10 words>", "backs": true or false}, ...]}"""
+
+
+def _window(vid, secs, before=10, after=40):
+    """A wider slice of the transcript than "what was said" shows, for checking a citation:
+    a summary's timestamp marks where a point starts, and the point can take a minute."""
+    d = ytgist.load_cached(vid) or {}
+    near = [s["text"].strip() for s in d.get("sentences", []) if secs - before <= s["start"] <= secs + after]
+    return " ".join(near)[:700]
+
+
+def _check_support(takeaways):
+    """Does each cited moment actually say what its takeaway claims?
+
+    The citation check in _structure only proves the timestamp exists in that video's summary,
+    not that it is about the takeaway: a brief once put "the 5090 draws 575-600 W" on a moment
+    about inference time (Denis, 7 Oct). One model call reads every claim next to its quote;
+    citations it rejects are removed, and a takeaway left with no supported moment goes, since
+    nothing on screen backs it. Returns (citations removed, takeaways removed). A model that
+    gives no usable answer changes nothing.
+
+    Every removal is also returned with the model's reason, so the page can show what was cut
+    and why, and a reader can disagree."""
+    items = []
+    for ti, t in enumerate(takeaways):
+        for c in t["cites"]:
+            if c["secs"] is not None:
+                q = _window(c["id"], c["secs"])
+                if q:
+                    items.append((ti, c, q))
+    if not items:
+        return 0, 0, []
+    user = "\n\n".join(f"{n}. CLAIM: {takeaways[ti]['headline']}. {takeaways[ti]['body']}\n"
+                        f"   QUOTE (V{c['k']} {c['stamp']}): {q}" for n, (ti, c, q) in enumerate(items, 1))
+    try:
+        with (_run_lock or threading.Lock()):
+            with model_client.Server.acquire(len(user) // 2 + 1200, log=lambda *_: None) as srv:
+                raw = srv.chat(SUPPORT_SYSTEM, user, max_tokens=200 + 40 * len(items), temperature=0.0)
+        m = re.search(r"\{.*\}", raw, re.S)
+        verdicts = (json.loads(m.group(0)).get("items") if m else None) or []
+        if not verdicts:
+            raise ValueError("no verdicts")
+        bad = {int(v["n"]) for v in verdicts if isinstance(v, dict) and v.get("backs") is False}
+        reason = {int(v["n"]): str(v.get("why") or "")[:120] for v in verdicts if isinstance(v, dict)}
+    except (model_client.ModelError, ValueError, TypeError) as e:
+        ytgist.log(f"  research: couldn't check the citations ({e}); keeping them")
+        return 0, 0, []
+    gone = [(items[n - 1][0], items[n - 1][1]) for n in sorted(bad) if 1 <= n <= len(items)]
+    removed = [{"headline": takeaways[ti]["headline"], "k": c["k"], "id": c["id"], "secs": c["secs"],
+                "stamp": c["stamp"], "why": reason.get(n, "")}
+               for n, (ti, c) in zip(sorted(n for n in bad if 1 <= n <= len(items)), gone)]
+    for ti, c in gone:
+        takeaways[ti]["cites"] = [x for x in takeaways[ti]["cites"] if x is not c]
+    before = len(takeaways)
+    checked = {ti for ti, _, _ in items}
+    keep = [t for ti, t in enumerate(takeaways)
+            if ti not in checked or any(c["secs"] is not None for c in t["cites"])]
+    left = {t["headline"] for t in keep}
+    for x in removed:
+        x["takeaway_left_out"] = x["headline"] not in left
+    takeaways[:] = keep
+    return len(gone), before - len(keep), removed
+
+
 def _structure(raw, sources, stamps, native=False):
     """The model's text → TL;DR, takeaways and extras, with every citation checked."""
     by_k = {s["k"]: s for s in sources}
@@ -675,14 +747,17 @@ def _structure(raw, sources, stamps, native=False):
                 body.append(lines[i].strip())
                 i += 1
             text = " ".join([rest] + body)
-            cites = cites_in(head + " " + text)
-            said = [{"k": c["k"], "stamp": c["stamp"], "text": _said(c["id"], c["secs"])}
-                    for c in cites if c["secs"] is not None][:2]
-            shot = next(({"k": c["k"], "id": c["id"], "secs": shots[c["k"]][c["secs"]]}
-                         for c in cites if c["secs"] is not None and c["secs"] in shots.get(c["k"], {})), None)
             takeaways.append({"headline": _CITE.sub("", head).strip(" ."),
                               "body": re.sub(r"\s{2,}", " ", _CITE.sub("", text)).strip(),
-                              "cites": cites, "said": [s for s in said if s["text"]], "shot": shot})
+                              "cites": cites_in(head + " " + text)})
+    unsupported, cut, removed = _check_support(takeaways)
+    for t in takeaways:
+        cites = t["cites"]
+        said = [{"k": c["k"], "stamp": c["stamp"], "text": _said(c["id"], c["secs"])}
+                for c in cites if c["secs"] is not None][:2]
+        t["said"] = [s for s in said if s["text"]]
+        t["shot"] = next(({"k": c["k"], "id": c["id"], "secs": shots[c["k"]][c["secs"]]}
+                          for c in cites if c["secs"] is not None and c["secs"] in shots.get(c["k"], {})), None)
     extras_md = "\n".join(extras).strip()
     md = "\n\n".join([f"TL;DR {tldr}"] + [
         f"{n}. **{t['headline']}** " + " ".join(
@@ -690,7 +765,8 @@ def _structure(raw, sources, stamps, native=False):
             else f"[V{c['k']}](https://youtu.be/{c['id']})" for c in t["cites"]) + f"\n{t['body']}"
         for n, t in enumerate(takeaways, 1)] + ([extras_md] if extras_md else []))
     return {"tldr": tldr, "takeaways": takeaways, "extras": extras_md, "markdown": md,
-            "sources": sources, "at": time.time(), "unverified_dropped": dropped[0]}
+            "sources": sources, "at": time.time(), "unverified_dropped": dropped[0],
+            "unsupported_dropped": unsupported, "takeaways_dropped": cut, "removed": removed}
 
 
 def _write_markdown(r):

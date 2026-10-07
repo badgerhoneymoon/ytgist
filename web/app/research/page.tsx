@@ -29,6 +29,8 @@ type Run = {
   n?: number; subject?: string; wider_at?: number;
   report?: {
     markdown: string; sources: Source[]; at: number; unverified_dropped: number;
+    unsupported_dropped?: number; takeaways_dropped?: number;
+    removed?: { headline: string; k: number; id: string; secs: number; stamp: string; why: string; takeaway_left_out?: boolean }[];
     tldr?: string; takeaways?: Step[]; extras?: string;
   } | null;
 };
@@ -485,6 +487,34 @@ export default function ResearchPage() {
                   </li>
                 ))}
               </ol>
+              {!!run.report.unsupported_dropped && (
+                <div className="mt-2 text-[12.5px] text-soft">
+                  {(() => {
+                    const n = run.report.unsupported_dropped ?? 0, t = run.report.takeaways_dropped ?? 0;
+                    return `Every citation was checked against the transcript: ${n} didn't back its takeaway and `
+                      + `${n > 1 ? "were" : "was"} removed`
+                      + (t ? `, and ${t} takeaway${t > 1 ? "s" : ""} with nothing behind ${t > 1 ? "them were" : "it was"} left out` : "")
+                      + ".";
+                  })()}
+                  {!!run.report.removed?.length && (
+                    <details className="mt-1.5 group">
+                      <summary className="cursor-pointer select-none text-[12.5px] font-medium text-soft hover:text-ink">
+                        What was removed, and why
+                      </summary>
+                      <ul className="mt-2 space-y-1.5 text-[13px] leading-[1.45] text-body">
+                        {run.report.removed.map((x, i) => (
+                          <li key={i}>
+                            <a href={`https://youtu.be/${x.id}?t=${x.secs}`} target="_blank" rel="noopener noreferrer"
+                               className="font-mono text-[12px] text-soft hover:text-accent">V{x.k} {x.stamp}</a>
+                            {" "}under &ldquo;{x.headline}&rdquo;{x.takeaway_left_out ? " (takeaway left out)" : ""}
+                            {x.why ? <span className="text-soft"> · {x.why}</span> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
