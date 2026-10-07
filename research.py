@@ -139,6 +139,40 @@ def cancel(rid):
     return True
 
 
+def recombine(rid):
+    """Write the brief again from the summaries already made (after a drop, or a new layout).
+    No searching and no summarising: only the combine step, under its own GPU booking."""
+    with _lock:
+        if _active["id"]:
+            raise Busy("Another research is running.")
+        r = load(rid)
+        if not r or r["status"] in ACTIVE:
+            return False
+        stop = threading.Event()
+        _active.update(id=rid, stop=stop)
+        r["status"], r["msg"] = "combining", "Writing the brief again"
+        _save(r)
+
+    def work():
+        try:
+            with shed.hold("YouTube research: rewriting a brief", cancelled=stop.is_set):
+                rr = load(rid)
+                rr["report"] = combine(rr, stop)
+                rr["status"], rr["msg"], rr["error"] = "done", "", None
+                _save(rr)
+                _write_markdown(rr)
+        except Exception as e:
+            rr = load(rid)
+            rr["status"], rr["error"] = "failed", str(e)
+            _save(rr)
+        finally:
+            with _lock:
+                if _active["id"] == rid:
+                    _active.update(id=None, stop=None)
+    threading.Thread(target=work, daemon=True).start()
+    return True
+
+
 def drop(rid, video):
     """Leave one video out. If its summary is still queued or running, that job is stopped."""
     r = load(rid)
@@ -325,31 +359,46 @@ def _gist_all(rid, stop, say):
 
 
 # ------------------------------------------------------------------------ combine
+# THE SAME SHAPE AS ONE VIDEO'S GIST (Denis, 7 Oct): TL;DR, then numbered takeaways whose
+# bold headlines state the point, a few short sentences each, the moments they rest on, and
+# what was said there. The comparative sections (agree / disagree / only one / watch first)
+# stay, but as extras the page shows collapsed.
 COMBINE_SYSTEM = """You write one research brief from several YouTube video summaries on the same topic.
 Each summary is tagged [V1], [V2] and so on, and its points carry timestamps like [12:34].
 Write {lang}. Use exactly this structure:
 
 TL;DR <3-4 sentences: the answer to the topic, as these videos give it together>
 
+1. **<headline that STATES THE POINT, not the topic>** [V2 12:34] [V5 03:10]
+<2-4 short sentences that keep the reasoning: why it holds, how, with what numbers>
+
+2. **<next point>** [V1 04:20]
+<...>
+
 ## Where they agree
-1. **<the point, stated as a claim>** <1-3 sentences> [V2 12:34] [V5 03:10]
+1. **<point>** <1-2 sentences> [V2 12:34] [V5 03:10]
 
 ## Where they disagree
-1. **<what the disagreement is about>** <who says what> [V1 04:20] [V4 22:15]
+1. **<what about>** <who says what> [V1 04:20] [V4 22:15]
 
 ## Only one of them says
-1. **<the point>** <1-2 sentences> [V7 08:02]
+1. **<point>** <1-2 sentences> [V7 08:02]
 
 ## Watch first
 1. [V3] <why, under 15 words>
 
-Rules: 4-7 points under "Where they agree"; write "Nothing worth noting." under a section
-with nothing real in it. Every point cites at least one source as [V<k> <mm:ss>] with a
-timestamp that appears in that video's summary. Use only what the summaries say. Exactly 3
-videos under "Watch first"."""
+Rules:
+- Headlines in sentence case, like a sentence, not Title Case.
+- {steps} numbered takeaways, ordered so that reading only the bold headlines gives the
+  shape of the answer. Combine what several videos say into one takeaway; do not go video by video.
+- Every takeaway and every point cites at least one source as [V<k> <mm:ss>], with a
+  timestamp that appears in that video's summary. Put the citations right after the headline.
+- Use only what the summaries say. Write "Nothing worth noting." under a section with
+  nothing real in it. Exactly 3 videos under "Watch first"."""
 
 _LINK = re.compile(r"\[(\d{1,2}:\d{2}(?::\d{2})?)\]\(https?://[^)]+\)")
 _CITE = re.compile(r"\[V(\d{1,2})(?:[ ,]+(\d{1,2}:\d{2}(?::\d{2})?))?\]")
+_STEP = re.compile(r"^\s*\d+[.)]\s+\*\*(.+?)\*\*\s*(.*)$")
 
 
 def _secs(ts):
@@ -357,11 +406,25 @@ def _secs(ts):
     return parts[0] * 3600 + parts[1] * 60 + parts[2] if len(parts) == 3 else parts[0] * 60 + parts[1]
 
 
+def _stamp(secs):
+    secs = int(secs)
+    return (f"{secs // 3600}:{secs % 3600 // 60:02d}:{secs % 60:02d}" if secs >= 3600
+            else f"{secs // 60:02d}:{secs % 60:02d}")
+
+
 def _digest(text):
     """A summary as the combine step sees it: links shortened to [mm:ss], quotes dropped
-    (the brief cites timestamps; the quotes stay one click away in each video's own page)."""
+    (the brief cites timestamps; what was said is attached afterwards, from the transcript)."""
     text = _LINK.sub(lambda m: f"[{m.group(1)}]", text)
     return "\n".join(l for l in text.splitlines() if not l.lstrip().startswith(">")).strip()
+
+
+def _said(vid, secs):
+    """What was said at a moment: the transcript itself, the same window a single video's
+    page shows. Taken from the cache, never from the model, so it cannot be invented."""
+    d = ytgist.load_cached(vid) or {}
+    near = [s["text"].strip() for s in d.get("sentences", []) if secs - 8 <= s["start"] <= secs + 22]
+    return " ".join(near)[:480]
 
 
 def combine(r, stop=None):
@@ -380,47 +443,115 @@ def combine(r, stop=None):
         blocks.append(f"[V{k}] {p['title']} — {p['channel']} ({_fmt_dur(p['duration'])})\n{text}")
     if len(sources) < 2:
         raise RuntimeError("Fewer than two videos could be summarised, so there is nothing to combine.")
-    lang = ("in the language most of these videos are in" if r["native"] else "in English")
+    lang = "in the language most of these videos are in" if r["native"] else "in English"
+    steps = "6-9" if len(sources) <= 5 else "8-12"
     user = f"Topic: {r['topic']}\n\n" + "\n\n".join(blocks)
     with (_run_lock or threading.Lock()):
         if stop is not None and stop.is_set():
             raise InterruptedError
-        with model_client.Server.acquire(len(user) // 2 + 3000, log=lambda *_: None) as srv:
-            need = srv.count_tokens(user) + 3000
-            if need > srv.ctx:
+        with model_client.Server.acquire(len(user) // 2 + 4500, log=lambda *_: None) as srv:
+            if srv.count_tokens(user) + 4500 > srv.ctx:
                 raise RuntimeError("Too much to combine in one pass; try fewer videos.")
-            raw = srv.chat(COMBINE_SYSTEM.format(lang=lang), user, max_tokens=2600, temperature=0.3)
+            raw = srv.chat(COMBINE_SYSTEM.format(lang=lang, steps=steps), user,
+                           max_tokens=4200, temperature=0.3)
+    return _structure(raw, sources, stamps)
+
+
+def _structure(raw, sources, stamps):
+    """The model's text → TL;DR, takeaways and extras, with every citation checked."""
     by_k = {s["k"]: s for s in sources}
     dropped = [0]
 
-    def cite(m):
+    def cites_in(text):
+        out = []
+        for m in _CITE.finditer(text):
+            k, ts = int(m.group(1)), m.group(2)
+            if k not in by_k:
+                dropped[0] += 1
+                continue
+            secs = _secs(ts) if ts else None
+            if secs is not None and secs not in stamps.get(k, set()):
+                dropped[0] += 1             # a timestamp the summary doesn't have: keep the source only
+                secs = None
+            c = {"k": k, "id": by_k[k]["id"], "secs": secs, "stamp": _stamp(secs) if secs is not None else None}
+            if c not in out:
+                out.append(c)
+        return out
+
+    def link(m):
         k, ts = int(m.group(1)), m.group(2)
         s = by_k.get(k)
         if not s:
-            dropped[0] += 1
             return ""
         if ts and _secs(ts) in stamps.get(k, set()):
             return f"[V{k} {ts}](https://youtu.be/{s['id']}?t={_secs(ts)})"
-        if ts:
-            dropped[0] += 1             # a timestamp the summary doesn't have: keep the source, drop the time
         return f"[V{k}](https://youtu.be/{s['id']})"
 
-    md = _CITE.sub(cite, raw).strip()
-    return {"markdown": md, "sources": sources, "at": time.time(),
-            "unverified_dropped": dropped[0]}
+    tldr, takeaways, extras, section = "", [], [], None
+    lines = raw.replace("\r", "").split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        i += 1
+        if not line:
+            continue
+        if line.upper().startswith("TL;DR") or line.upper().startswith("TLDR"):
+            tldr = _CITE.sub("", re.sub(r"^TL;?DR[:\s]*", "", line, flags=re.I)).strip()
+            continue
+        if line.startswith("## "):
+            section = line[3:].strip()
+            extras.append(line)
+            continue
+        if section is not None:
+            extras.append(_CITE.sub(link, line))
+            continue
+        m = _STEP.match(line)
+        if m:
+            head, rest = m.group(1).strip(), m.group(2)
+            body = []
+            while i < len(lines) and lines[i].strip() and not _STEP.match(lines[i]) and not lines[i].startswith("## "):
+                body.append(lines[i].strip())
+                i += 1
+            text = " ".join([rest] + body)
+            cites = cites_in(head + " " + text)
+            said = [{"k": c["k"], "stamp": c["stamp"], "text": _said(c["id"], c["secs"])}
+                    for c in cites if c["secs"] is not None][:2]
+            takeaways.append({"headline": _CITE.sub("", head).strip(" ."),
+                              "body": re.sub(r"\s{2,}", " ", _CITE.sub("", text)).strip(),
+                              "cites": cites, "said": [s for s in said if s["text"]]})
+    extras_md = "\n".join(extras).strip()
+    md = "\n\n".join([f"TL;DR {tldr}"] + [
+        f"{n}. **{t['headline']}** " + " ".join(
+            f"[V{c['k']} {c['stamp']}](https://youtu.be/{c['id']}?t={c['secs']})" if c["secs"] is not None
+            else f"[V{c['k']}](https://youtu.be/{c['id']})" for c in t["cites"]) + f"\n{t['body']}"
+        for n, t in enumerate(takeaways, 1)] + ([extras_md] if extras_md else []))
+    return {"tldr": tldr, "takeaways": takeaways, "extras": extras_md, "markdown": md,
+            "sources": sources, "at": time.time(), "unverified_dropped": dropped[0]}
 
 
 def _write_markdown(r):
     """The same brief as a plain .md next to the JSON, readable without any app."""
     rep = r["report"]
-    head = [f"# Research: {r['topic']}", "",
-            time.strftime("%Y-%m-%d %H:%M", time.localtime(rep["at"])) +
-            f" · {len(rep['sources'])} videos", "", rep["markdown"], "", "## Sources", ""]
+    out = [f"# Research: {r['topic']}", "",
+           time.strftime("%Y-%m-%d %H:%M", time.localtime(rep["at"])) + f" · {len(rep['sources'])} videos", ""]
+    if rep.get("takeaways"):
+        out.append(f"**TL;DR** {rep['tldr']}\n")
+        for n, t in enumerate(rep["takeaways"], 1):
+            cites = " ".join(f"[V{c['k']}{' ' + c['stamp'] if c['stamp'] else ''}](https://youtu.be/{c['id']}"
+                             + (f"?t={c['secs']}" if c["secs"] is not None else "") + ")" for c in t["cites"])
+            out += [f"## {n}. {t['headline']} {cites}", "", t["body"], ""]
+            for s in t["said"]:
+                out += [f"> V{s['k']} {s['stamp']}: {s['text']}…", ""]
+        if rep.get("extras"):
+            out += ["---", "", rep["extras"], ""]
+    else:
+        out += [rep["markdown"], ""]
+    out += ["## Sources", ""]
     for s in rep["sources"]:
-        head.append(f"- **V{s['k']}** [{s['title']}](https://youtu.be/{s['id']}) — "
-                    f"{s['channel']} · {_fmt_dur(s['duration'])}")
+        out.append(f"- **V{s['k']}** [{s['title']}](https://youtu.be/{s['id']}) — "
+                   f"{s['channel']} · {_fmt_dur(s['duration'])}")
     with open(os.path.join(DIR, f"{r['id']}.md"), "w", encoding="utf-8") as f:
-        f.write("\n".join(head) + "\n")
+        f.write("\n".join(out) + "\n")
 
 
 # ---------------------------------------------------------------- a page to read it
@@ -438,12 +569,18 @@ ol{padding-left:22px}li{margin:0 0 14px}a{color:var(--accent);text-decoration:no
  background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 14px;font-size:14.5px}
 .vid b{font-weight:600}.vid .m{color:var(--mute);font-size:13px}.st{font-size:12.5px;color:var(--mute);white-space:nowrap}
 .st.ok{color:var(--ok)}.bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin:18px 0 6px}.bar i{display:block;height:100%;background:var(--accent)}
+.steps{list-style:none;padding:0;margin:34px 0}.steps li{display:grid;grid-template-columns:44px 1fr;gap:6px;margin:0 0 34px}
+.steps .n{font-weight:650;color:var(--mute);font-size:14px;padding-top:3px}.steps h3{margin:0;font-size:19px;line-height:1.3}
+.steps p{margin:8px 0 0;font:18px/1.6 Georgia,"PT Serif",serif;color:var(--ink)}.chips{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px}
+details summary{cursor:pointer;color:var(--mute);font-size:13px;margin-top:10px}blockquote{margin:8px 0 0;padding:10px 14px;border-left:2px solid var(--line);
+ background:var(--card);font:15.5px/1.5 Georgia,"PT Serif",serif}.extra{border-top:1px solid var(--line);padding:4px 0 8px}
+.extra summary{font:600 16px -apple-system,sans-serif;color:var(--ink);margin:12px 0}.extra ol{padding-left:22px}
 """
 
 
 def page(r):
-    """The brief as one self-contained HTML page. Escape first, then add markup: the text comes
-    from strangers' transcripts."""
+    """The brief as one self-contained HTML page, laid out like a single video's gist.
+    Escape first, then add markup: the text comes from strangers' transcripts."""
     import html as H
     live = r["status"] in ACTIVE
     out = [f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -464,34 +601,56 @@ def page(r):
                    + (f" · {H.escape(r.get('msg') or '')}" if r.get("msg") and r["status"] in ACTIVE else "") + "</div>")
         if r.get("error"):
             out.append(f"<p>{H.escape(r['error'])}</p>")
-    rep = r.get("report")
-    if rep:
-        md = H.escape(rep["markdown"])
+
+    def cite_links(md):
+        md = H.escape(md)
         md = re.sub(r"\[(V\d+(?: \d{1,2}:\d{2}(?::\d{2})?)?)\]\((https://youtu\.be/[^)]+)\)",
                     r'<a class=cite href="\2" target=_blank rel=noopener>\1</a>', md)
-        md = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", md)
-        blocks, items = [], []
+        return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", md)
 
-        def close():
-            if items:
-                blocks.append("<ol>" + "".join(f"<li>{i}</li>" for i in items) + "</ol>")
-                items.clear()
-        for line in md.splitlines():
+    rep = r.get("report")
+    if rep and rep.get("takeaways"):
+        out.append(f"<div class=tldr>{H.escape(rep['tldr'])}</div><ol class=steps>")
+        for n, t in enumerate(rep["takeaways"], 1):
+            chips = "".join(
+                f"<a class=cite href='https://youtu.be/{c['id']}" + (f"?t={c['secs']}" if c["secs"] is not None else "")
+                + f"' target=_blank rel=noopener>V{c['k']}{(' ' + c['stamp']) if c['stamp'] else ''}</a>"
+                for c in t["cites"])
+            said = "".join(f"<blockquote><span class=k>V{s['k']} · {s['stamp']}</span> {H.escape(s['text'])}…</blockquote>"
+                           for s in t["said"])
+            out.append(f"<li><div class=n>{n}</div><div><h3>{H.escape(t['headline'])}</h3><p>{H.escape(t['body'])}</p>"
+                       f"<div class=chips>{chips}</div>"
+                       + (f"<details open><summary>what was said</summary>{said}</details>" if said else "")
+                       + "</div></li>")
+        out.append("</ol>")
+        if rep.get("extras"):
+            parts = re.split(r"(?m)^## ", rep["extras"])
+            for part in parts:
+                if not part.strip():
+                    continue
+                title, _, body = part.partition("\n")
+                items = []
+                for line in body.splitlines():
+                    s = line.strip()
+                    if not s:
+                        continue
+                    m = re.match(r"^\d+[.)]\s+(.*)", s)
+                    items.append(f"<li>{cite_links(m.group(1) if m else s)}</li>")
+                out.append(f"<details class=extra><summary>{H.escape(title.strip())}</summary><ol>{''.join(items)}</ol></details>")
+        out.append("<h2>Sources</h2>")
+    elif rep:                                    # a brief written before the takeaway layout
+        blocks = []
+        for line in rep["markdown"].splitlines():
             s = line.strip()
             if not s:
                 continue
-            m = re.match(r"^\d+[.)]\s+(.*)", s)
             if s.startswith("TL;DR"):
-                close(); blocks.append(f"<div class=tldr>{s[5:].strip()}</div>")
+                blocks.append(f"<div class=tldr>{cite_links(s[5:].strip())}</div>")
             elif s.startswith("## "):
-                close(); blocks.append(f"<h2>{s[3:]}</h2>")
-            elif m:
-                items.append(m.group(1))
-            elif items:
-                items[-1] += " " + s
+                blocks.append(f"<h2>{H.escape(s[3:])}</h2>")
             else:
-                blocks.append(f"<p>{s}</p>")
-        close()
+                body = re.sub(r"^\d+[.)]\s+", "", s)
+                blocks.append(f"<p>{cite_links(body)}</p>")
         out += blocks
         out.append("<h2>Sources</h2>")
     out.append("<div class=vids>")

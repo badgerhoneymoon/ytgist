@@ -7,7 +7,7 @@ import History from "./History";
 import Preview from "./Preview";
 import Progress from "./Progress";
 import Result from "./Result";
-import { ENGINE } from "./engine";
+import { ENGINE, ON_PC } from "./engine";
 import Link from "next/link";
 
 // DIRECT to the engine, NOT through Next's rewrite: the rewrite buffers server-sent
@@ -384,6 +384,13 @@ export default function Home() {
         </div>
 
         <div className="-mt-1 flex shrink-0 items-center gap-2">
+        <span
+          title={ON_PC ? "transcribing and summarising on the RTX 5090" : "the PC is off, so this Mac does the work"}
+          className="flex items-center gap-1.5 rounded-lg px-1.5 py-1.5 text-[12px] text-soft"
+        >
+          <span className={`h-1.5 w-1.5 rounded-full ${ON_PC ? "bg-good" : "bg-soft/50"}`} />
+          {ON_PC ? "on the PC" : "on this Mac"}
+        </span>
         <Link
           href="/research"
           title="a topic in: ten videos, one brief"

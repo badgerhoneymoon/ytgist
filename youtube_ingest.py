@@ -274,9 +274,18 @@ def sheet_jpeg(frag_url: str, dest: str) -> str:
     webp = dest + ".webp"
     try:
         urllib.request.urlretrieve(frag_url, webp)
-        r = subprocess.run(["sips", "-s", "format", "jpeg", webp, "--out", dest],
-                           capture_output=True, text=True)
-        if r.returncode != 0 or not os.path.exists(dest):
+        if shutil.which("sips"):
+            r = subprocess.run(["sips", "-s", "format", "jpeg", webp, "--out", dest],
+                               capture_output=True, text=True)
+            ok = r.returncode == 0
+        else:                       # the PC (Linux): Pillow reads WebP; ffmpeg still must not
+            try:
+                from PIL import Image
+                Image.open(webp).convert("RGB").save(dest, "JPEG", quality=90)
+                ok = True
+            except Exception:
+                ok = False
+        if not ok or not os.path.exists(dest):
             raise IngestError("sheet", "could not convert a storyboard sheet")
         if os.path.getsize(dest) > 8_000_000:       # a sheet is ~120 KB; 8 MB is a runaway
             os.remove(dest)

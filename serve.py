@@ -679,11 +679,15 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, TypeError) as exc:
                 return self._json({"error": str(exc)}, 400)
             return self._json({"id": rid})
-        m = re.fullmatch(r"/api/research/([0-9a-f]{12})/(cancel|drop)", self.path)
+        m = re.fullmatch(r"/api/research/([0-9a-f]{12})/(cancel|drop|recombine)", self.path)
         if m:
             req = self._request() if m.group(2) == "drop" else {}
-            ok = (research.cancel(m.group(1)) if m.group(2) == "cancel"
-                  else research.drop(m.group(1), str(req.get("video", ""))))
+            try:
+                ok = (research.cancel(m.group(1)) if m.group(2) == "cancel"
+                      else research.recombine(m.group(1)) if m.group(2) == "recombine"
+                      else research.drop(m.group(1), str(req.get("video", ""))))
+            except research.Busy as exc:
+                return self._json({"error": str(exc)}, 409)
             return self._json({"ok": ok})
         if self.path == "/api/cancel":
             try:

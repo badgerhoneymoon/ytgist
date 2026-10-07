@@ -184,7 +184,19 @@ def matches(frame_path: str, tile_path: str) -> bool:
 
 def tile_jpeg(sheet_path: str, cell: int, cols: int, rows: int, dest: str):
     """Crop one cell out of a sheet, for the match check. sips crops from the top-left."""
+    import shutil
     import subprocess
+    if not shutil.which("sips"):     # the PC (Linux): the same crop with Pillow
+        try:
+            from PIL import Image
+            im = Image.open(sheet_path)
+            tw, th = im.width // cols, im.height // rows
+            x, y = (cell % cols) * tw, (cell // cols) * th
+            im.crop((x, y, x + tw, y + th)).convert("RGB").save(dest, "JPEG", quality=90)
+        except Exception:
+            return None
+        sig = _signature(dest)
+        return None if (not sig or max(sig) - min(sig) < 4) else dest
     from_sips = subprocess.run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", sheet_path],
                                capture_output=True, text=True).stdout
     nums = [int(n) for n in re.findall(r"pixel(?:Width|Height): (\d+)", from_sips)]
