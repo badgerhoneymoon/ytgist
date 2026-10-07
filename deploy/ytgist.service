@@ -1,0 +1,28 @@
+# systemd USER service for running the ytgist engine on a Linux / WSL2 PC with an NVIDIA GPU.
+#   cp deploy/ytgist.service ~/.config/systemd/user/ && systemctl --user enable --now ytgist
+# Edit the paths to match where you put the repo, the venv, llama.cpp and the models.
+[Unit]
+Description=ytgist engine (YouTube gists + research mode)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/ai/ytgist
+Environment=PATH=%h/ai/ytgist/.venv/bin:%h/.deno/bin:%h/ai/llama.cpp/build/bin:/usr/local/bin:/usr/bin:/bin
+# Reachable from your other machines (e.g. over Tailscale). Leave 127.0.0.1 if it isn't needed:
+# the engine runs yt-dlp on URLs it is sent, so never expose it to a network you don't trust.
+Environment=YTGIST_HOST=0.0.0.0
+Environment=YTGIST_PORT=8766
+Environment=YTGIST_MODEL=%h/ai/models/llm/Qwen3.6-27B-UD-Q5_K_XL.gguf
+Environment=YTGIST_MMPROJ=%h/ai/models/llm/mmproj-F16-Qwen3.6-27B.gguf
+# Short parking: on a shared card a parked 20 GB server shouldn't sit there for minutes.
+Environment=YTGIST_IDLE=60
+Environment=YTGIST_NEMO_IDLE=90
+# Optional: book a shared GPU first (see shed.py).
+# Environment=YTGIST_SHED=http://127.0.0.1:8700
+ExecStart=%h/ai/ytgist/.venv/bin/python serve.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=130
+
+[Install]
+WantedBy=default.target

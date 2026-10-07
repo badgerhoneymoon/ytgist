@@ -504,8 +504,15 @@ class Handler(BaseHTTPRequestHandler):
             for label, mins in (("under 20 min", 12), ("about an hour", 60), ("2 hours", 120)):
                 secs = sum(ytgist.estimate(mins, cached=False).values())
                 bands.append({"label": label, "secs": round(secs)})
+            # RESEARCH, the same way: ten ~15-minute videos through the measured pipeline, plus
+            # searching/picking and combining; screenshots at this machine's measured rate.
+            per = sum(ytgist.estimate(15, cached=False).values())
+            shots = ytgist.frames_cost(10)
+            research_est = {"plain": round(60 + 10 * per + 75),
+                            "shots": round(60 + 10 * (per + shots) + 75)}
             body = json.dumps({"bands": bands,
                                "max_hours": round(ytgist.max_minutes() / 60, 1),
+                               "research": research_est,
                                "runs": len(timing_log._rows())}).encode()
             self.send_response(200)
             self._cors()
@@ -674,7 +681,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 req = self._request()
                 rid = research.start(req.get("topic", ""), req.get("n", 10), bool(req.get("native")),
-                                     bool(req.get("shots", True)))
+                                     bool(req.get("shots", False)))
             except research.Busy as exc:
                 return self._json({"error": str(exc)}, 409)
             except (ValueError, TypeError) as exc:

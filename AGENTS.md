@@ -148,6 +148,15 @@ small-RAM machines) so the next request skips the model load. It reaps itself.
   expensive part; the audio is not ours to hoard.
 - **Summaries are cached per language.** English and native are separate files. A change that
   makes them share one destroys the other.
+- **One research run at a time**, and its videos go through the ordinary job queue. Don't give
+  research its own summarising path: the cache, the library and the timing log all depend on
+  every summary being an ordinary job.
+- **Research citations are verified twice over.** A `[Vk mm:ss]` must name a real source AND a
+  timestamp that appears in that video's (already verified) summary; "what was said" comes from
+  the cached transcript and the screenshot from that video's own pass — never from the model.
+- **On CUDA, VRAM is the memory budget** (`model_client._VRAM_GB`), not system RAM, and every
+  layer goes on the GPU (`-ngl 999`). Parakeet runs through NeMo when `parakeet-mlx` is absent;
+  the cache key names the backend, so a Mac transcript is never reused by the PC.
 - **The context ceiling is computed, not constant** (`model_client.ctx_ceiling`). It reads
   the machine's RAM and the model's file size. Hardcoding it back breaks small machines.
 
@@ -173,6 +182,8 @@ small-RAM machines) so the next request skips the model load. It reaps itself.
 | `~/.cache/ytgist/` | transcripts and summaries (JSON) |
 | `~/.ytgist/runs.jsonl` | one row per run: timings, prediction, RAM/power context |
 | `~/.ytgist/expands.jsonl` | one row per "more detail" click |
+| `~/.ytgist/research/` | research runs: `<id>.json` (status, picks, report) and `<id>.md` |
+| `~/.ytgist/remote` | the Mac launcher's remote engine URL (one line), if any |
 | `/tmp/ytgist-serve.log` | engine log |
 | `~/Library/Logs/ytgist.log` | the .app launcher's log |
 
@@ -183,7 +194,9 @@ small-RAM machines) so the next request skips the model load. It reaps itself.
 | `model_client.py` | llama-server lifecycle, context sizing, warm pool |
 | `gist_prompt.py` | every prompt + timestamp verification |
 | `timing_log.py` | the self-calibrating ETA |
-| `gpu.py` | temperature/load via macmon and ioreg |
+| `gpu.py` | temperature/load via macmon and ioreg; nvidia-smi on a PC |
+| `research.py` | research mode: queries, search, pick, combine, verify, the standalone page |
+| `shed.py` | optional booking of a shared GPU (`YTGIST_SHED`) |
 | `serve.py` | HTTP + SSE |
 
 ---

@@ -1,11 +1,16 @@
-"""GPU booking on Denis's PC (the "AI shed"). A no-op on the Mac.
+"""Booking a SHARED GPU before using it. A no-op unless YTGIST_SHED is set.
 
-The PC's GPU is shared: H3 video renders, a voice model, and now ytgist. The Shed agent on the
-PC keeps one booking at a time (http://127.0.0.1:8700/agents.md). ytgist books before it puts
-anything on the GPU and releases when it is done; if someone else holds the GPU, the job WAITS
-and says who it is waiting for, rather than starting and running everybody out of memory.
+On a machine where other things also use the GPU (video renders, a voice model), ytgist asks a
+small booking service before it puts anything on the card and releases it afterwards. If
+someone else holds the GPU, the job WAITS and says who it is waiting for, rather than starting
+and running everybody out of memory.
 
-Set YTGIST_SHED=http://127.0.0.1:8700 to turn this on. Unset (the Mac), every call is free.
+The service is not part of ytgist. Any HTTP server with these endpoints works:
+    POST /api/gpu/book     {"who", "task", "minutes"}  → 200, or 409 {"msg"} while someone else holds it
+    POST /api/gpu/release  {"who"}
+    GET  /api/status       {"gpu": {"used_gb"}, "job": ..., "svc": {"comfyui": {"running"}}}  (optional)
+    POST /api/gpu/free     ask an idle ComfyUI to unload its model                     (optional)
+The author's is the "Shed" agent on his PC. Set YTGIST_SHED=http://127.0.0.1:8700 to use one.
 """
 import contextlib
 import json

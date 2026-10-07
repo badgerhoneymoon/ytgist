@@ -49,11 +49,12 @@ wait_for() { for _ in $(seq 1 60); do up "$1" && return 0; sleep 0.5; done; retu
 # The ENGINE owns transcription and the model; the WEB server is just the interface.
 # Started separately and only if down, so launching twice never doubles either one.
 #
-# THE PC FIRST. When Denis's PC (RTX 5090, over Tailscale) answers, its engine does the work
-# and the Mac's memory stays free; otherwise the Mac's own engine, exactly as before. The
-# choice reaches the page through YTGIST_ENGINE, read by Next at request time.
-PC="http://desktop-8rqc3fq:8766"
-if curl -sf -m 2 -o /dev/null "$PC/api/limits"; then
+# A REMOTE ENGINE FIRST. When one is configured (one line in ~/.ytgist/remote, e.g. a PC with
+# an NVIDIA GPU over Tailscale) and it answers, it does the work and the Mac's memory stays
+# free; otherwise the Mac's own engine, exactly as before. The choice reaches the page through
+# YTGIST_ENGINE, read by Next at request time.
+PC="${YTGIST_REMOTE:-$(cat "$HOME/.ytgist/remote" 2>/dev/null)}"
+if [ -n "$PC" ] && curl -sf -m 2 -o /dev/null "$PC/api/limits"; then
   export YTGIST_ENGINE="$PC"
 else
   export YTGIST_ENGINE=""

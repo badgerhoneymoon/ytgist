@@ -110,7 +110,7 @@ def attach(store, run_lock=None, cancel_job=None):
 
 
 # ------------------------------------------------------------------------- start
-def start(topic, n=10, native=False, shots=True):
+def start(topic, n=10, native=False, shots=False):
     topic = " ".join(str(topic or "").split())
     if not 3 <= len(topic) <= 200:
         raise ValueError("Give a topic of 3–200 characters.")
@@ -698,8 +698,10 @@ def page(r):
             said = "".join(f"<blockquote><span class=k>V{s['k']} · {s['stamp']}</span> {H.escape(s['text'])}…</blockquote>"
                            for s in t["said"])
             sh = t.get("shot")
-            pic = (f"<a href='https://youtu.be/{sh['id']}?t={sh['secs']}' target=_blank rel=noopener>"
-                   f"<img class=shot src='/api/frame?v={sh['id']}&t={sh['secs']}' alt='V{sh['k']} at {_stamp(sh['secs'])}'></a>") if sh else ""
+            pic = (f"<a href='/api/frame?v={sh['id']}&t={sh['secs']}' target=_blank rel=noopener title='full size'>"
+                   f"<img class=shot src='/api/frame?v={sh['id']}&t={sh['secs']}' alt='V{sh['k']} at {_stamp(sh['secs'])}'></a>"
+                   f"<a class=cite href='https://youtu.be/{sh['id']}?t={sh['secs']}' target=_blank rel=noopener>"
+                   f"watch V{sh['k']} from {_stamp(sh['secs'])}</a>") if sh else ""
             out.append(f"<li><div class=n>{n}</div><div><h3>{H.escape(t['headline'])}</h3><p>{H.escape(t['body'])}</p>{pic}"
                        f"<div class=chips>{chips}</div>"
                        + (f"<details open><summary>what was said</summary>{said}</details>" if said else "")

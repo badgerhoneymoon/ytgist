@@ -9,6 +9,11 @@ the audio never leaves the laptop.
 YouTube link → yt-dlp (audio only) → Parakeet MLX → Qwen3.6 27B → a numbered argument
 ```
 
+Also: **research mode** (a topic → the 10 most useful videos → one brief across all of them),
+and the same engine on **a Linux / WSL2 PC with an NVIDIA GPU**, which the Mac uses
+automatically whenever it's on. See [Research mode](#research-mode) and
+[Running on an NVIDIA PC](#running-on-an-nvidia-pc-linux--wsl2).
+
 ---
 
 ## What you get
@@ -297,6 +302,129 @@ python3 -m unittest discover -p 'test_integration.py' -v
 
 ---
 
+## Research mode
+
+A topic instead of a link: the most useful videos on it, each summarised, then **one brief
+across all of them**, laid out like a single video's gist.
+
+```
+topic → 4 YouTube searches → model picks 10 → 10 gists (+ screenshots) → one brief
+```
+
+1. **Search.** The model rewrites your topic into three more queries (the practitioner's words,
+   another angle). Plus your topic as typed, that makes four. yt-dlp runs YouTube's own search
+   for each, metadata only, and the results are pooled: about 40–50 candidates, minus shorts,
+   live streams and anything too long to summarise.
+2. **Pick.** The model reads the titles and descriptions and chooses the 10 that together teach
+   the most: substantive, different people and angles. Code enforces at most 2 per channel.
+3. **Gist.** Each pick is an ordinary job, so it lands in the library, uses the cache and can be
+   opened on its own. Screenshots are a tick box, off by default: on an RTX 5090 they add about
+   2 minutes per video. The page shows both estimates, from this machine's own measurements.
+4. **Combine.** One brief:
+   - a TL;DR, then 8–12 numbered takeaways
+   - each with a headline that states the point, a few sentences, and the moments it rests on
+     (`V3 12:34`)
+   - **what was said** at those moments, taken from the transcript, never from the model
+   - the screenshot that video found for that moment, if any
+
+   Below that, collapsed: where they agree, where they disagree, what only one says, and which
+   to watch first. Every citation is checked against that video's summary; a timestamp it
+   doesn't have is dropped, and the source stays.
+
+Open it from the **Research** link at the top of the page. One research runs at a time.
+
+| endpoint | purpose |
+|---|---|
+| `POST /api/research` `{"topic", "n": 10, "shots": false, "native": false}` | start → `{"id"}`; 409 while one is running |
+| `GET /api/research?limit=20` | recent runs and the active one |
+| `GET /api/research/ID` | status, the queries, the picks, then `report` |
+| `POST /api/research/ID/drop` `{"video"}` | leave one video out |
+| `POST /api/research/ID/cancel` | stop |
+| `POST /api/research/ID/recombine` | write the brief again from the finished summaries |
+| `GET /research/ID` · `/research/ID.md` | the brief as a standalone page, or as markdown |
+
+Runs live in `~/.ytgist/research/` (JSON + markdown).
+
+Measured on an RTX 5090: 10 videos in about 5 minutes plus about a minute to combine, or about
+half an hour with screenshots.
+
+---
+
+## Running on an NVIDIA PC (Linux / WSL2)
+
+The same engine runs on Linux with an NVIDIA GPU. When `parakeet-mlx` isn't installed, it uses
+the same Parakeet weights through NVIDIA NeMo. The model's context is sized to the card's
+VRAM, every layer goes on the GPU, and screenshots crop with Pillow instead of macOS `sips`.
+Measured on an RTX 5090 for a 15-minute video:
+
+- transcription: 22 s, including loading Parakeet
+- summary: 9 s, plus a 13 s model load
+
+Tested on Ubuntu 24.04 under WSL2.
+
+**1. System packages + CUDA toolkit** (the toolkit is only needed to build llama.cpp):
+
+```bash
+sudo apt install ffmpeg cmake ninja-build unzip build-essential
+# WSL2: NVIDIA's wsl-ubuntu repo (no driver; Windows provides it). Native Linux: the ubuntu repo.
+wget https://developer.download.nvidia.com/compute/cuda/repos/wsl-ubuntu/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb && sudo apt update && sudo apt install cuda-toolkit-13-0   # or newer, up to your driver
+```
+
+**2. llama.cpp with CUDA.** Set the architecture for your card (`120` = RTX 50-series):
+
+```bash
+git clone --depth 1 https://github.com/ggml-org/llama.cpp ~/ai/llama.cpp && cd ~/ai/llama.cpp
+PATH=/usr/local/cuda/bin:$PATH cmake -B build -G Ninja -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120 -DLLAMA_CURL=OFF
+cmake --build build --target llama-server -j
+```
+
+**3. Python environment.** Install torch first and pin it, or NeMo's resolver may pull a
+different build:
+
+```bash
+uv venv --python 3.12 ~/ai/ytgist/.venv
+uv pip install --python ~/ai/ytgist/.venv/bin/python torch torchaudio --index-url https://download.pytorch.org/whl/cu130
+~/ai/ytgist/.venv/bin/python -c "import torch;print('torch=='+torch.__version__)" > /tmp/pin.txt
+uv pip install --python ~/ai/ytgist/.venv/bin/python "nemo_toolkit[asr]" "transformers>=4.50" "yt-dlp[default]" \
+  --constraint /tmp/pin.txt --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match
+curl -fsSL https://deno.land/install.sh | sh        # yt-dlp needs a JS runtime for YouTube
+```
+
+`transformers>=4.50` is not optional. Without it, the resolver walks back to a 2021
+`transformers` whose tokenizers need a Rust compiler to build.
+
+**4. Model.** Download the GGUF (and the projector, `mmproj-F16-Qwen3.6-27B.gguf`, for
+screenshots) to a Linux path, not `/mnt/c`: WSL reads Windows drives at about 0.3 GB/s.
+
+**5. Run it as a service.** Use [`deploy/ytgist.service`](deploy/ytgist.service): edit the
+paths, then `systemctl --user enable --now ytgist`.
+
+**Using it from the Mac.** Put the PC engine's address in `~/.ytgist/remote`:
+
+```bash
+echo "http://my-pc:8766" > ~/.ytgist/remote
+```
+
+`./ui` and the `.app` then use the PC whenever it answers, and the Mac's own engine when it
+doesn't. The page shows which: **on the PC** or **on this Mac**. The two machines keep separate
+libraries. `YTGIST_ENGINE=mac ./ui` forces the Mac.
+
+**Sharing the GPU.** If other things use the same card, set `YTGIST_SHED` to a booking service
+(see [`shed.py`](shed.py) for the four endpoints). ytgist books the GPU before each job, waits
+while someone else holds it, and holds nothing on the GPU when idle.
+
+| variable | default | what |
+|---|---|---|
+| `YTGIST_MODEL` / `YTGIST_MMPROJ` | `~/models/…` | the GGUF and its vision projector |
+| `YTGIST_HOST` / `YTGIST_PORT` | `127.0.0.1` / `8765` | where the engine listens |
+| `YTGIST_IDLE` | 300 s (45 on small machines) | how long a finished model server stays parked |
+| `YTGIST_NEMO_IDLE` | 90 s | how long Parakeet stays loaded between videos (CUDA) |
+| `YTGIST_SHED` | unset | GPU booking service, if the card is shared |
+| `~/.ytgist/remote` or `YTGIST_REMOTE` | unset | the Mac launcher's remote engine |
+
+---
+
 ## Troubleshooting
 
 **`HTTP 403` on download.** YouTube refuses transiently. The app already retries three
@@ -325,8 +453,11 @@ video has nothing to transcribe.
 | `model_client.py` | llama-server lifecycle, adaptive context, the warm pool |
 | `gist_prompt.py` | every prompt, and the timestamp verifier |
 | `timing_log.py` | the self-calibrating ETA |
-| `gpu.py` | temperature and load, via macmon and ioreg |
+| `gpu.py` | temperature and load, via macmon and ioreg (nvidia-smi on a PC) |
+| `research.py` | research mode: search, pick, combine, the standalone brief page |
+| `shed.py` | optional booking of a shared GPU |
 | `serve.py` | HTTP + SSE for the web interface |
+| `deploy/ytgist.service` | systemd unit for a Linux / WSL2 PC |
 | `web/` | Next.js interface |
 
 Built for one person's use, then handed to a second. No telemetry, nothing phones home.

@@ -233,7 +233,7 @@ export default function Result({
  *  engine's cache, and it is the thing that knows where. Which also means these pictures
  *  exist on this Mac only — the reason Copy stays text.
  */
-function Shot({ shot, videoId }: { shot: Takeaway["frame"]; videoId: string }) {
+export function Shot({ shot, videoId }: { shot: Takeaway["frame"]; videoId: string }) {
   const [open, setOpen] = useState(false);
   if (!shot) return null;
   if (shot.state === "failed") {

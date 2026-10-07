@@ -3,9 +3,11 @@
 # One command, because two terminals for a personal tool is friction that compounds.
 set -e
 cd "$(dirname "$0")"
-# The PC's engine when the PC is on (YTGIST_ENGINE=mac forces this Mac's own).
-PC="http://desktop-8rqc3fq:8766"
-if [ "$YTGIST_ENGINE" != "mac" ] && curl -sf -m 2 -o /dev/null "$PC/api/limits"; then
+# A REMOTE ENGINE FIRST, if one is configured and answers (e.g. a PC with an NVIDIA GPU, see
+# README "Running on an NVIDIA PC"). Its URL is one line in ~/.ytgist/remote or YTGIST_REMOTE.
+# YTGIST_ENGINE=mac forces this Mac's own engine.
+PC="${YTGIST_REMOTE:-$(cat "$HOME/.ytgist/remote" 2>/dev/null)}"
+if [ "$YTGIST_ENGINE" != "mac" ] && [ -n "$PC" ] && curl -sf -m 2 -o /dev/null "$PC/api/limits"; then
   export YTGIST_ENGINE="$PC"
   echo "engine  → $PC  (the PC)"
 else

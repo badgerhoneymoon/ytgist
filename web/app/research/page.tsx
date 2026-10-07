@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { ENGINE, ON_PC } from "../engine";
+import { Shot } from "../Result";
 
 /** Research mode: a topic → the ~10 most useful videos → one brief across all of them.
  *
@@ -114,14 +115,9 @@ function StepView({ n, t }: { n: number; t: Step }) {
       <div className="col-start-2 max-sm:col-start-1">
         <h3 className="text-[19.5px] font-semibold leading-[1.28] tracking-[-0.006em] text-ink">{t.headline}</h3>
         <p className="prose-serif mt-3 font-serif text-[19px] leading-[1.6] text-body">{t.body}</p>
-        {t.shot && (
-          <a href={`https://youtu.be/${t.shot.id}?t=${t.shot.secs}`} target="_blank" rel="noopener noreferrer"
-             title={`V${t.shot.k}: open at this moment`} className="mt-4 block w-fit">
-            {/* A plain <img>: served by the engine on another host, which next/image would need configuring for. */}
-            <img src={`${ENGINE}/api/frame?v=${t.shot.id}&t=${t.shot.secs}`} alt={`V${t.shot.k} at this moment`}
-                 className="max-h-[16rem] w-auto max-w-full rounded-lg border border-line" loading="lazy" />
-          </a>
-        )}
+        {/* The same screenshot as a single video's step: click for the lightbox, with
+            "watch from" inside it, rather than leaving for YouTube (Denis, 7 Oct). */}
+        {t.shot && <Shot shot={{ state: "found", secs: t.shot.secs }} videoId={t.shot.id} />}
         {t.said.length > 0 && (
           <div>
             <button onClick={() => setOpen((v) => !v)} aria-expanded={open}
@@ -181,7 +177,14 @@ export default function ResearchPage() {
   const [run, setRun] = useState<Run | null>(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const [shots, setShots] = useState(true);
+  // OFF by default (Denis, 7 Oct): screenshots roughly quadruple the time. The estimate next to
+  // the box comes from the engine's own measurements, so it is this machine's, not a guess.
+  const [shots, setShots] = useState(false);
+  const [est, setEst] = useState<{ plain: number; shots: number } | null>(null);
+  useEffect(() => {
+    fetch(`${ENGINE}/api/limits`).then((r) => r.json()).then((d) => d.research && setEst(d.research)).catch(() => {});
+  }, []);
+  const mins = (s: number) => (s < 90 ? "about a minute" : `about ${Math.round(s / 60)} min`);
 
   const loadRuns = useCallback(async () => {
     try {
@@ -289,11 +292,19 @@ export default function ResearchPage() {
           Research
         </button>
       </form>
-      <label className="mt-3 flex w-fit items-center gap-2 text-[13.5px] text-soft">
-        <input type="checkbox" checked={shots} onChange={(e) => setShots(e.target.checked)} disabled={live || busy}
-               className="h-3.5 w-3.5 accent-[var(--color-accent)]" />
-        Look for a screenshot for each takeaway (about 2 minutes more per video)
-      </label>
+      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[13.5px] text-soft">
+        <label className="flex w-fit items-center gap-2">
+          <input type="checkbox" checked={shots} onChange={(e) => setShots(e.target.checked)} disabled={live || busy}
+                 className="h-3.5 w-3.5 accent-[var(--color-accent)]" />
+          Include screenshots
+        </label>
+        {est && (
+          <span className="tabular-nums">
+            {mins(shots ? est.shots : est.plain)} for 10 videos
+            {!shots && <span className="text-soft/70"> · {mins(est.shots)} with screenshots</span>}
+          </span>
+        )}
+      </div>
       {err && <p className="mt-3 text-[13.5px] text-accent">{err}</p>}
 
       {run && (
