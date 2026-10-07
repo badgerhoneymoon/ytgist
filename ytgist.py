@@ -660,6 +660,8 @@ def _nemo_model():
             import logging
             logging.getLogger("nemo_logger").setLevel(logging.ERROR)
             import nemo.collections.asr as nemo_asr
+            from nemo.utils import logging as nemo_logging
+            nemo_logging.setLevel(logging.ERROR)     # NeMo narrates every dataloader setting otherwise
             m = nemo_asr.models.ASRModel.from_pretrained(PARAKEET, map_location="cuda")
             m.eval()
             # NVIDIA's recipe for long audio: local attention + chunked subsampling keep
