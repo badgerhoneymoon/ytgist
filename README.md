@@ -9,7 +9,7 @@ the audio never leaves the laptop.
 YouTube link → yt-dlp (audio only) → Parakeet MLX → Qwen3.6 27B → a numbered argument
 ```
 
-Also: **research mode** (a topic → the 10 most useful videos → one brief across all of them),
+Also: **research mode** (a topic → up to 10 videos that are about it → one brief across all of them),
 and the same engine on **a Linux / WSL2 PC with an NVIDIA GPU**, which the Mac uses
 automatically whenever it's on. See [Research mode](#research-mode) and
 [Running on an NVIDIA PC](#running-on-an-nvidia-pc-linux--wsl2).
@@ -308,15 +308,23 @@ A topic instead of a link: the most useful videos on it, each summarised, then *
 across all of them**, laid out like a single video's gist.
 
 ```
-topic → 4 YouTube searches → model picks 10 → 10 gists (+ screenshots) → one brief
+topic → 4 YouTube searches → model scores every result → up to 10 gists (+ screenshots) → one brief
 ```
 
-1. **Search.** The model rewrites your topic into three more queries (the practitioner's words,
-   another angle). Plus your topic as typed, that makes four. yt-dlp runs YouTube's own search
-   for each, metadata only, and the results are pooled: about 40–50 candidates, minus shorts,
-   live streams and anything too long to summarise.
-2. **Pick.** The model reads the titles and descriptions and chooses the 10 that together teach
-   the most: substantive, different people and angles. Code enforces at most 2 per channel.
+1. **Search.** The model rewrites your topic into three short queries of 2–6 words, the way
+   people type them: the subject alone, the subject plus its most important detail, and a
+   practitioner's or case-study angle. (YouTube matches long, stacked queries badly.) Plus
+   your topic as typed, that makes four. yt-dlp runs YouTube's own search for each, metadata
+   only, with approximate upload dates, and the results are pooled: about 40–50 candidates,
+   minus shorts, live streams and anything too long to summarise.
+2. **Pick.** The model names the topic's subject and scores every result from its title and
+   description: 3 = about the subject and its details, 2 = the subject with one detail loosened,
+   1 = only near it (general advice from the field, reviews, idea lists), 0 = off. Code then
+   picks up to 10 from the 3s and 2s, and **never fills up with 1s**: a niche topic gets 3
+   good videos, not 10 with 7 off-topic. If fewer than 6 qualify, it searches once more with
+   three broader queries and scores again. On fast-changing topics (tools, models, prices, ad
+   rules) videos 2+ years old go last and 3+ years old are left out. At most 2 per channel.
+   The page shows the subject, how many fit or came close, and each video's age.
 3. **Gist.** Each pick is an ordinary job, so it lands in the library, uses the cache and can be
    opened on its own. Screenshots are a tick box, off by default: on an RTX 5090 they add about
    2 minutes per video. The page shows both estimates, from this machine's own measurements.

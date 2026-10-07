@@ -30,6 +30,7 @@ import youtube_ingest as yt
 DIR = os.path.expanduser("~/.ytgist/research")
 SEARCH_N = 40
 PER_CHANNEL = 2
+WIDEN_BELOW = 6                 # fewer on-topic picks than this → one wider search round
 MIN_SECONDS = 4 * 60            # shorts and clips teach little and crowd out real talks
 MAX_SECONDS = 2 * 3600          # and a 6-hour stream would eat the whole run
 ACTIVE = ("searching", "picking", "summarising", "combining")
@@ -205,7 +206,7 @@ def _run(rid, stop):
         merged = {**r, **fresh}
         if r.get("picks") and not fresh.get("picks"):
             merged["picks"] = r["picks"]
-        for k in ("queries", "searched"):
+        for k in ("queries", "searched", "wider_at", "subject"):
             if k in r:
                 merged[k] = r[k]
         r = merged
@@ -227,7 +228,20 @@ def _run(rid, stop):
             if len(cands) < 2:
                 raise RuntimeError("YouTube returned almost nothing for that topic. Try other words.")
             say(status="picking")
-            picks = pick(r["topic"], cands, r["n"], stop)
+            picks, r["subject"] = pick(r["topic"], cands, r["n"], stop)
+            if len(picks) < min(r["n"], WIDEN_BELOW):
+                say(msg=f"Only {len(picks)} fit. Searching wider")
+                more = queries_for(r["topic"], stop, tried=r["queries"])
+                if more:
+                    r["wider_at"] = len(r["queries"])
+                    r["queries"] = r["queries"] + more
+                    cands = search_all(r["queries"], limit=72)
+                    r["searched"] = len(cands)
+                    say(msg=f"Found {len(cands)} videos. Choosing again")
+                    picks, r["subject"] = pick(r["topic"], cands, r["n"], stop)
+            if len(picks) < 2:
+                raise RuntimeError("Fewer than two videos on YouTube fit that topic closely. "
+                                   "Try broader words, or split it into two topics.")
             r["picks"] = [{**p, "status": "queued", "job": None, "stage": ""} for p in picks]
             say(status="summarising", msg=f"Summarising {len(picks)} videos")
             _gist_all(rid, stop, say)
@@ -258,33 +272,52 @@ def _run(rid, stop):
 
 
 QUERY_SYSTEM = """You turn a research topic into YouTube search queries.
-Write 3 different queries that together find the best videos on it: one close to the topic,
-one with the words an expert or practitioner would use, one aimed at a different angle
-(a comparison, a deep dive, a common mistake, a specific tool). Same language as the topic.
+People type short searches, and YouTube matches long ones badly: a query that stacks every
+detail of a topic finds videos that fit none of it. So first split the topic into its SUBJECT
+(what the videos must be about) and its CONSTRAINTS (audience, place, budget, platform...).
+Write 3 queries of 2-6 words each, the way a person types them:
+1. the subject alone, in the plainest words;
+2. the subject plus its single most important constraint;
+3. the subject as a practitioner would search it, or as examples / a case study.
+Same language as the topic.
+Answer with JSON only: {"queries": ["...", "...", "..."]}"""
+
+WIDER_SYSTEM = """A YouTube search for a research topic found too few videos that fit it.
+Write 3 BROADER searches of 2-6 words each that would find useful neighbours: drop the
+narrowest constraints, name the general activity behind the topic, or use a common synonym.
+Don't repeat a search that was already tried. Same language as the topic.
 Answer with JSON only: {"queries": ["...", "...", "..."]}"""
 
 
-def queries_for(topic, stop=None):
-    """The topic as typed, plus three rewrites by the model. A single YouTube search only sees
-    what YouTube ranks for that exact phrase (Denis, 7 Oct); pooling several finds more."""
-    out = [topic]
+def queries_for(topic, stop=None, tried=None):
+    """The topic as typed, plus three short rewrites by the model. A single YouTube search only
+    sees what YouTube ranks for that exact phrase (Denis, 7 Oct); pooling several finds more.
+    Rewrites are kept short because long, stacked queries return noise (Denis, 7 Oct: a
+    Facebook-ads question got a printer review and a Pakistan TikTok guide).
+
+    With `tried`, the first round found too few videos that fit: three broader searches come
+    back instead, without the topic or any query already tried."""
+    out = [] if tried else [topic]
+    seen = [q.lower() for q in (tried or [])]
+    system = WIDER_SYSTEM if tried else QUERY_SYSTEM
+    user = f"Topic: {topic}" + ("\nAlready tried:\n" + "\n".join(f"- {q}" for q in tried) if tried else "")
     try:
         with (_run_lock or threading.Lock()):
             if stop is not None and stop.is_set():
                 raise InterruptedError
             with model_client.Server.acquire(2000, log=lambda *_: None) as srv:
-                raw = srv.chat(QUERY_SYSTEM, f"Topic: {topic}", max_tokens=200, temperature=0.4)
+                raw = srv.chat(system, user, max_tokens=200, temperature=0.4)
         m = re.search(r"\{.*\}", raw, re.S)
         for q in (json.loads(m.group(0)).get("queries") if m else []) or []:
             q = " ".join(str(q).split())[:120]
-            if q and q.lower() not in [x.lower() for x in out]:
+            if q and q.lower() not in seen + [x.lower() for x in out]:
                 out.append(q)
     except (model_client.ModelError, ValueError, TypeError) as e:
-        ytgist.log(f"  research: no query rewrites ({e}); searching the topic as typed")
-    return out[:4]
+        ytgist.log(f"  research: no query rewrites ({e})")
+    return out[:3] if tried else out[:4]
 
 
-def search_all(queries):
+def search_all(queries, limit=48):
     """Every query's results, pooled: a video found by several queries ranks by its best
     position, and the pool is interleaved so no single query crowds out the others."""
     pooled = {}
@@ -293,12 +326,15 @@ def search_all(queries):
             old = pooled.get(c["id"])
             if old is None or c["rank"] < old["rank"]:
                 pooled[c["id"]] = {**c, "query": qi}
-    return sorted(pooled.values(), key=lambda c: (c["rank"], c["query"]))[:48]
+    return sorted(pooled.values(), key=lambda c: (c["rank"], c["query"]))[:limit]
 
 
 def search(topic, per=SEARCH_N):
     """yt-dlp's YouTube search, metadata only. Nothing is downloaded here."""
+    # approximate_date turns YouTube's "2 years ago" into a timestamp, at no extra cost: a flat
+    # search has no dates otherwise, and the picker needs them to prefer recent videos.
     rc, out, err = yt._run(["yt-dlp", "--ignore-config", "--flat-playlist", "-J",
+                            "--extractor-args", "youtubetab:approximate_date",
                             f"ytsearch{per}:{topic}"], timeout=90)
     if rc != 0:
         raise yt.IngestError(*yt._classify(err))
@@ -313,17 +349,43 @@ def search(topic, per=SEARCH_N):
         seen.add(vid)
         out_list.append({"id": vid, "rank": i + 1, "title": e.get("title") or vid,
                          "channel": e.get("channel") or e.get("uploader") or "",
-                         "duration": dur, "views": e.get("view_count"),
+                         "duration": dur, "views": e.get("view_count"), "ts": e.get("timestamp"),
                          "desc": (e.get("description") or "")[:160]})
     return out_list
 
 
-PICK_SYSTEM = """You choose YouTube videos for someone researching a topic.
-You get numbered search results. Pick the {n} that TOGETHER teach the most about the topic:
-substantive talks, lectures, interviews, deep dives, tutorials and expert analysis, from
-different people and angles. Skip reaction videos, compilations, music, trailers, clickbait
-and near-duplicates. At most 2 from the same channel.
-Answer with JSON only: {{"picks": [{{"n": <number>, "why": "<under 12 words>"}}]}}, most useful first."""
+PICK_SYSTEM = """You judge YouTube search results for someone researching a topic.
+First split the topic into its SUBJECT (the core thing a video must be about, in a few words)
+and its DETAILS (audience, place, platform, budget...). Then score EVERY numbered result by
+its title and description:
+3 = about the subject and its details
+2 = about the subject with one detail loosened (another platform, market or audience, or a
+    similar product); it still answers part of the question directly
+1 = only near it: general advice from the wider field, product reviews, lists of ideas,
+    business basics that never touch the subject
+0 = another subject, or a reaction video, compilation, music, trailer or clickbait
+Be strict: when unsure between two scores, give the lower one. When several results say the
+same thing from the same angle (the same tutorial from different channels), score only the
+best of them 2 or 3 and the rest 1: the picks should cover different parts of the question.
+Also say whether the topic depends on things that change fast (tools, AI models, versions,
+prices, platforms, ad rules, algorithms).
+Answer with JSON only:
+{"subject": "<the subject, without the details>", "changes": true or false,
+ "scores": [{"n": <number>, "s": <0-3>, "why": "<under 12 words, only when s is 2 or 3>"}]}"""
+
+OLD_YEARS, TOO_OLD_YEARS = 2, 3   # for fast-changing topics: sorted last / left out
+
+
+def _age(ts, now=None):
+    """'3 weeks ago', '2 years ago': as rough as YouTube's own label, which is where it comes from."""
+    if not ts:
+        return ""
+    days = max(0, ((now or time.time()) - ts) / 86400)
+    for size, unit in ((365, "year"), (30, "month"), (7, "week"), (1, "day")):
+        if days >= size:
+            n = int(days // size)
+            return f"{n} {unit}{'s' if n > 1 else ''} ago"
+    return "today"
 
 
 def _fmt_dur(s):
@@ -335,37 +397,61 @@ def pick(topic, cands, n, stop=None):
     lines = []
     for i, c in enumerate(cands, 1):
         views = f" · {c['views']:,} views" if c.get("views") else ""
-        lines.append(f"{i}. {c['title']} — {c['channel']} · {_fmt_dur(c['duration'])}{views}"
+        age = f" · {_age(c.get('ts'))}" if c.get("ts") else ""
+        lines.append(f"{i}. {c['title']} — {c['channel']} · {_fmt_dur(c['duration'])}{views}{age}"
                      + (f"\n   {c['desc']}" if c.get("desc") else ""))
-    user = f"Topic: {topic}\n\n" + "\n".join(lines)
-    chosen, why = [], {}
+    user = f"Topic: {topic}\nToday: {time.strftime('%Y-%m-%d')}\n\n" + "\n".join(lines)
+    scores, why, subject, changes, judged = {}, {}, "", False, False
+    budget = 400 + 30 * len(cands)          # one short line per result
     try:
         with (_run_lock or threading.Lock()):
             if stop is not None and stop.is_set():
                 raise InterruptedError
-            with model_client.Server.acquire(len(user) // 2 + 1500, log=lambda *_: None) as srv:
-                raw = srv.chat(PICK_SYSTEM.format(n=n), user, max_tokens=900, temperature=0.2)
+            with model_client.Server.acquire(len(user) // 2 + budget + 600, log=lambda *_: None) as srv:
+                raw = srv.chat(PICK_SYSTEM, user, max_tokens=budget, temperature=0.1)
         m = re.search(r"\{.*\}", raw, re.S)
-        for p in (json.loads(m.group(0)).get("picks") if m else []) or []:
-            i = int(p.get("n", 0)) - 1
-            if 0 <= i < len(cands) and i not in chosen:
-                chosen.append(i)
-                why[i] = str(p.get("why", ""))[:120]
-    except (model_client.ModelError, ValueError, KeyError, TypeError) as e:
-        ytgist.log(f"  research: the model couldn't pick ({e}); falling back to search order")
-    # The channel cap is enforced here, not trusted to the prompt; and if the model picked
-    # too few, the list is topped up in YouTube's own relevance order.
+        data = json.loads(m.group(0)) if m else {}
+        subject = " ".join(str(data.get("subject") or "").split())[:80]
+        changes = bool(data.get("changes"))
+        for row in data.get("scores") or []:
+            i = int(row.get("n", 0)) - 1
+            if 0 <= i < len(cands) and i not in scores:
+                scores[i] = max(0, min(3, int(row.get("s", 0))))
+                why[i] = str(row.get("why") or "")[:120]
+        judged = bool(scores)
+    except (model_client.ModelError, ValueError, KeyError, TypeError, AttributeError) as e:
+        ytgist.log(f"  research: the model couldn't score the results ({e}); falling back to search order")
+
+    # The model scores every result; the choosing happens here, where it is the same every
+    # time. Only 3s and 2s are ever picked, however few: topping up from YouTube's order is
+    # what filled runs with a printer review and a Pakistan TikTok guide (Denis, 7 Oct). On a
+    # topic that changes fast, old videos go last and very old ones not at all (Denis, 7 Oct:
+    # "I don't think we should rely on old videos"). Search order is only the fallback for a
+    # model that gave no answer at all.
+    now = time.time()
+
+    def years(c):
+        return (now - c["ts"]) / (365 * 86400) + 0.01 if c.get("ts") else 0
+
+    if judged:
+        order = [i for i in scores if scores[i] >= 2
+                 and not (changes and years(cands[i]) >= TOO_OLD_YEARS)]
+        order.sort(key=lambda i: (-scores[i], changes and years(cands[i]) >= OLD_YEARS,
+                                  cands[i].get("rank", 99)))
+    else:
+        order = list(range(len(cands)))
     per, final = {}, []
-    for i in chosen + [j for j in range(len(cands)) if j not in chosen]:
+    for i in order:
         ch = cands[i]["channel"].lower()
         if per.get(ch, 0) >= PER_CHANNEL:
             continue
         per[ch] = per.get(ch, 0) + 1
-        final.append({**{k: cands[i][k] for k in ("id", "title", "channel", "duration", "views")},
-                      "why": why.get(i, "")})
+        final.append({**{k: cands[i].get(k) for k in ("id", "title", "channel", "duration", "views", "ts")},
+                      "why": why.get(i, ""),
+                      "fit": {3: "fits", 2: "close"}.get(scores.get(i), "")})
         if len(final) >= n:
             break
-    return final
+    return final, subject
 
 
 def _gist_all(rid, stop, say):
@@ -444,6 +530,9 @@ Rules:
   timestamp that appears in that video's summary. Put the citations right after the headline.
 - The extra sections are lists, not one line each: 3-6 points under "Where they agree",
   1-4 under "Where they disagree", 2-5 under "Only one of them says" - as many as are real.
+- Each video says roughly when it was published. On anything that changes (tools, versions,
+  prices, platforms, rules), trust the newer video when they differ, and if a takeaway rests
+  only on videos 2 or more years old, say so in its text ("from a 2023 video").
 - Use only what the summaries say. Write "Nothing worth noting." under a section with
   nothing real in it. Exactly 3 videos under "Watch first"."""
 
@@ -490,8 +579,9 @@ def combine(r, stop=None):
         text = _digest(g["text"])
         stamps[k] = {_secs(t) for t in re.findall(r"\[(\d{1,2}:\d{2}(?::\d{2})?)\]", text)}
         sources.append({"k": k, "id": p["id"], "title": p["title"], "channel": p["channel"],
-                        "duration": p["duration"]})
-        blocks.append(f"[V{k}] {p['title']} — {p['channel']} ({_fmt_dur(p['duration'])})\n{text}")
+                        "duration": p["duration"], "ts": p.get("ts")})
+        age = f", published {_age(p.get('ts'))}" if p.get("ts") else ""
+        blocks.append(f"[V{k}] {p['title']} — {p['channel']} ({_fmt_dur(p['duration'])}{age})\n{text}")
     if len(sources) < 2:
         raise RuntimeError("Fewer than two videos could be summarised, so there is nothing to combine.")
     lang = "in the language most of these videos are in" if r["native"] else "in English"
@@ -623,7 +713,7 @@ def _write_markdown(r):
     out += ["## Sources", ""]
     for s in rep["sources"]:
         out.append(f"- **V{s['k']}** [{s['title']}](https://youtu.be/{s['id']}) — "
-                   f"{s['channel']} · {_fmt_dur(s['duration'])}")
+                   f"{s['channel']} · {_fmt_dur(s['duration'])}" + (f" · {_age(s['ts'])}" if s.get("ts") else ""))
     with open(os.path.join(DIR, f"{r['id']}.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(out) + "\n")
 
@@ -746,6 +836,7 @@ def page(r):
                "failed": "failed"}.get(st, st)
         out.append(f"<div class=vid><span class=k>V{k}</span><span><a href='https://youtu.be/{v['id']}' target=_blank rel=noopener>"
                    f"<b>{H.escape(v['title'])}</b></a><br><span class=m>{H.escape(v['channel'])} · {_fmt_dur(v['duration'])}"
+                   + (f" · {_age(v['ts'])}" if v.get("ts") else "")
                    + (f" · {H.escape(v.get('why') or '')}" if v.get("why") else "") + "</span></span>"
                    f"<span class='st{' ok' if st == 'succeeded' else ''}'>{H.escape(stl)}</span></div>")
     out.append("</div></main>")

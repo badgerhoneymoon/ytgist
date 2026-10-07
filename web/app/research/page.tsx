@@ -14,9 +14,9 @@ import { Shot } from "../Result";
 
 type Pick = {
   id: string; title: string; channel: string; duration: number; views?: number;
-  why: string; status: string; stage?: string; error?: string;
+  why: string; status: string; stage?: string; error?: string; fit?: string; ts?: number | null;
 };
-type Source = { k: number; id: string; title: string; channel: string; duration: number };
+type Source = { k: number; id: string; title: string; channel: string; duration: number; ts?: number | null };
 type Cite = { k: number; id: string; secs: number | null; stamp: string | null };
 type Step = {
   headline: string; body: string; cites: Cite[]; said: { k: number; stamp: string; text: string }[];
@@ -25,6 +25,7 @@ type Step = {
 type Run = {
   id: string; topic: string; status: string; msg: string; created: number;
   picks: Pick[]; error?: string | null; searched?: number; queries?: string[];
+  n?: number; subject?: string; wider_at?: number;
   report?: {
     markdown: string; sources: Source[]; at: number; unverified_dropped: number;
     tldr?: string; takeaways?: Step[]; extras?: string;
@@ -212,6 +213,31 @@ function CopyBrief({ id }: { id: string }) {
   );
 }
 
+/** "· 4 exact, 3 close" — how many picks are about the subject itself and how many loosen one
+ *  detail. Said out loud so a short list reads as "YouTube has little on this", not a bug. */
+function fitLine(run: Run): string {
+  const kept = (run.picks ?? []).filter((p) => p.status !== "dropped");
+  const fits = kept.filter((p) => p.fit === "fits").length;
+  const close = kept.filter((p) => p.fit === "close").length;
+  if (!fits && !close) return "";
+  const parts = [fits ? `${fits} exact` : "none exact", ...(close ? [`${close} close`] : [])];
+  return ` · ${parts.join(", ")}${run.searched ? ` (of ${run.searched} found)` : ""}`;
+}
+
+/** Roughly when a video went up, as rough as YouTube's own "2 years ago" (that is where the
+ *  date comes from). Two years and older is tinted: on tools, prices and ad rules an old
+ *  video can be confidently wrong, and Denis wants to see which ones those are at a glance.
+ *  Measured from when the run searched (`now`, seconds), which is when YouTube's label held. */
+function Age({ ts, now }: { ts?: number | null; now: number }) {
+  if (!ts) return null;
+  const days = Math.max(0, (now - ts) / 86400);
+  const units: [number, string][] = [[365, "year"], [30, "month"], [7, "week"], [1, "day"]];
+  const hit = units.find(([size]) => days >= size);
+  const n = hit ? Math.floor(days / hit[0]) : 0;
+  const text = hit ? `${n} ${hit[1]}${n > 1 ? "s" : ""} ago` : "today";
+  return <span className={days >= 730 ? "font-medium text-accent" : ""}> · {text}</span>;
+}
+
 function Status({ s }: { s: string }) {
   const look: Record<string, [string, ReactNode, string]> = {
     succeeded: ["Done", <Check key="i" size={13} strokeWidth={3} />, "bg-good/12 text-good"],
@@ -313,7 +339,7 @@ export default function ResearchPage() {
   const rows = !run ? [] : run.report
     ? run.report.sources.map((s) => {
         const p = picks.find((x) => x.id === s.id);
-        return { ...s, why: p?.why || "", status: "succeeded", error: "" };
+        return { ...s, ts: s.ts ?? p?.ts, why: p?.why || "", status: "succeeded", error: "" };
       })
     : picks.map((p, i) => ({ ...p, k: i + 1 }));
 
@@ -325,7 +351,7 @@ export default function ResearchPage() {
             <Link href="/" className="hover:text-accent">ytgist</Link> · research
           </h1>
           <p className="mt-2 text-[15px] leading-[1.45] text-soft">
-            A topic in. The ten most useful videos, and one brief across all of them.
+            A topic in. Up to ten videos that are about it, and one brief across all of them.
           </p>
         </div>
         <span className="-mt-1 flex shrink-0 items-center gap-1.5 px-1.5 py-1.5 text-[12px] text-soft">
@@ -390,9 +416,18 @@ export default function ResearchPage() {
                   <li key={i} className="pl-1">
                     {q}
                     {i === 0 && <span className="ml-2 text-[12px] text-soft">as you typed</span>}
+                    {run.wider_at !== undefined && i === run.wider_at && (
+                      <span className="ml-2 text-[12px] text-soft">wider, because too few fit</span>
+                    )}
                   </li>
                 ))}
               </ol>
+              {run.subject && (
+                <p className="mt-2.5 text-[13.5px] text-soft">
+                  Kept only videos about <span className="font-medium text-ink">{run.subject}</span>
+                  {fitLine(run)}
+                </p>
+              )}
             </div>
           )}
 
@@ -439,7 +474,7 @@ export default function ResearchPage() {
                       <a href={`https://youtu.be/${p.id}`} target="_blank" rel="noopener noreferrer"
                          className="text-[14.5px] font-medium text-ink hover:text-accent">{p.title}</a>
                       <span className="block truncate text-[12.5px] text-soft">
-                        {p.channel} · {dur(p.duration)}{p.why ? ` · ${p.why}` : ""}
+                        {p.channel} · {dur(p.duration)}<Age ts={p.ts} now={run.created} />{p.why ? ` · ${p.why}` : ""}
                         {p.status === "failed" && p.error ? ` · ${p.error}` : ""}
                       </span>
                     </span>
