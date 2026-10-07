@@ -6,14 +6,16 @@ cd "$(dirname "$0")"
 # A REMOTE ENGINE FIRST, if one is configured and answers (e.g. a PC with an NVIDIA GPU, see
 # README "Running on an NVIDIA PC"). Its URL is one line in ~/.ytgist/remote or YTGIST_REMOTE.
 # YTGIST_ENGINE=mac forces this Mac's own engine.
+# This Mac's engine starts EITHER WAY: with the PC chosen it idles as the fallback the page
+# offers when the PC's GPU is busy.
+pkill -f "ytgist/serve.py" 2>/dev/null || true
+./serve > /tmp/ytgist-serve.log 2>&1 &
 PC="${YTGIST_REMOTE:-$(cat "$HOME/.ytgist/remote" 2>/dev/null)}"
 if [ "$YTGIST_ENGINE" != "mac" ] && [ -n "$PC" ] && curl -sf -m 2 -o /dev/null "$PC/api/limits"; then
   export YTGIST_ENGINE="$PC"
-  echo "engine  → $PC  (the PC)"
+  echo "engine  → $PC  (the PC; this Mac's engine idles as the fallback)"
 else
   export YTGIST_ENGINE=""
-  pkill -f "ytgist/serve.py" 2>/dev/null || true
-  ./serve > /tmp/ytgist-serve.log 2>&1 &
   echo "engine  → http://127.0.0.1:8765  (log: /tmp/ytgist-serve.log)"
 fi
 cd web && exec npm run dev

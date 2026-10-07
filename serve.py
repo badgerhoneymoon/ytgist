@@ -497,6 +497,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith("/api/gpu"):
+            # Is the GPU free for a new job? Someone else's booking, an unbooked ComfyUI render,
+            # or a research run of our own all mean a wait; the page offers this Mac instead.
+            b = shed.busy()
+            if not b and research._active.get("id"):
+                rr = research.load(research._active["id"]) or {}
+                b = {"who": "ytgist", "task": "research", "minutes": None,
+                     "text": f"A research run is going: {rr.get('topic', '')[:60]}"}
+            return self._json({"busy": bool(b), **(b or {})})
         elif self.path.startswith("/api/limits"):
             # The page used to hard-code "under 20 min ~1 min". Those numbers came from my
             # head; the engine has been measuring the real ones all along (Denis, 2026-08-09).

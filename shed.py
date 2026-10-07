@@ -47,6 +47,45 @@ def _book(task):
     return _call("POST", "/api/gpu/book", {"who": WHO, "task": task, "minutes": BOOK_MINUTES})
 
 
+def busy():
+    """Who else is on the GPU right now, as {"who", "task", "minutes", "text"}, or None.
+
+    Two cases count: someone else's booking, and a ComfyUI render that nobody booked (Denis
+    rendering by hand). The page asks this before it starts a job, so it can offer this Mac
+    instead of a silent wait (Denis, 7 Oct). None when there is no Shed agent or it is down:
+    unknown is not busy."""
+    if not SHED:
+        return None
+    try:
+        _, st = _call("GET", "/api/status", timeout=3)
+    except Exception:
+        return None
+    now = time.time()
+    b = st.get("booking") or {}
+    if b.get("who") and b.get("who") != WHO and b.get("until", 0) > now:
+        mins = max(1, round((b["until"] - now) / 60))
+        task = b.get("task") or ""
+        return {"who": b["who"], "task": task, "minutes": mins,
+                "text": f"{b['who']} has it{' for ' + task if task else ''} · booked for up to {mins} more min"}
+    j = st.get("job")
+    if j and b.get("who") != WHO:
+        pct = f" · {round(100 * j['value'] / j['max'])}%" if j.get("max") else ""
+        return {"who": "ComfyUI", "task": j.get("name") or "a render", "minutes": None,
+                "text": f"ComfyUI is rendering {j.get('name') or 'something'}{pct} (not booked)"}
+    return None
+
+
+def _unbooked_render():
+    """A ComfyUI render with no booking behind it: the GPU is full even though the booking
+    says free. Loading a 25 GB model next to it would crash one of the two."""
+    try:
+        _, st = _call("GET", "/api/status", timeout=3)
+        b = st.get("booking") or {}
+        return bool(st.get("job")) and not (b.get("who") and b.get("until", 0) > time.time())
+    except Exception:
+        return False
+
+
 def _free_comfy_if_idle():
     """ComfyUI keeps its last model in VRAM after a render. If nothing is rendering, ask it to
     let go: the 27B needs ~25 GB of the 32."""
@@ -95,8 +134,11 @@ def hold(task, wait_msg=None, cancelled=None):
                     code, msg = _book(task)
                 except OSError:
                     break                      # the Shed agent is down: don't block work on it
-                if code == 200:
+                if code == 200 and not _unbooked_render():
                     break
+                if code == 200:                # booked, but ComfyUI is rendering unbooked:
+                    _call("POST", "/api/gpu/release", {"who": WHO})     # give it back, wait
+                    msg = {"msg": "ComfyUI is rendering (not booked)"}
                 text = "Waiting for the GPU: " + (msg.get("msg") or "someone else is using it")
                 if wait_msg and text != shown:
                     wait_msg(text)

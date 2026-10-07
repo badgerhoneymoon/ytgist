@@ -7,7 +7,8 @@ import History from "./History";
 import Preview from "./Preview";
 import Progress from "./Progress";
 import Result from "./Result";
-import { ENGINE, ON_PC } from "./engine";
+import { ENGINE, switchEngine } from "./engine";
+import { EngineLabel, useBusyGate } from "./BusyGate";
 import Link from "next/link";
 
 // DIRECT to the engine, NOT through Next's rewrite: the rewrite buffers server-sent
@@ -96,6 +97,7 @@ export default function Home() {
   // one the button under a finished summary triggers; this only decides whether the run
   // goes on to do it without being asked again.
   const [shots, setShots] = useState(false);
+  const [gate, busyDialog] = useBusyGate();
   const [eta, setEta] = useState<Record<string, number> | null>(null);
   const [phaseAgo, setPhaseAgo] = useState(0);
   const [gpuSeries, setGpuSeries] = useState<GpuSample[]>([]);
@@ -271,6 +273,7 @@ export default function Home() {
   // On load, ask what the engine is doing. A run in flight restores the progress bar from
   // its cumulative state; one that finished while the page was closed opens as a result.
   useEffect(() => {
+    if (new URLSearchParams(location.search).get("go") === "1") return;   // a hand-over: see below
     fetch(`${ENGINE}/api/current`)
       .then((r) => (r.ok ? r.json() : null))
       .then((c) => {
@@ -328,9 +331,22 @@ export default function Home() {
       mode: "" | "regen" | "refresh" = "",
       urlOverride?: string,
       nativeOverride?: boolean,
+      shotsOverride?: boolean,
+      skipGate?: boolean,
     ) => {
       const target = (urlOverride ?? url).trim();
       if (!target || busy) return;
+      const nat = nativeOverride ?? native;
+      const sh = shotsOverride ?? shots;
+      // A new gist asks first whether the PC's GPU is free; if not, it can go to this Mac.
+      if (!mode && !skipGate) {
+        const where = await gate("this video");
+        if (where === "cancel") return;
+        if (where === "mac") {
+          switchEngine("mac", `/?url=${encodeURIComponent(target)}&native=${nat ? 1 : 0}&shots=${sh ? 1 : 0}&go=1`);
+          return;
+        }
+      }
       setGist(null);
       setError("");
       setPct(0);
@@ -345,8 +361,8 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           url: target,
-          native: nativeOverride ?? native,
-          shots,
+          native: nat,
+          shots: sh,
           regen: mode === "regen",       // new summary, transcript reused
           refresh: mode === "refresh",   // download and transcribe again too
         }),
@@ -354,8 +370,25 @@ export default function Home() {
       const { job } = await res.json();
       attach(job, target);
     },
-    [url, busy, native, shots, attach]
+    [url, busy, native, shots, attach, gate]
   );
+
+  // The hand-over: "Run on this Mac" reloads this window on the Mac's engine with the video in
+  // the address, and it starts here, once, without asking again.
+  const handedOver = useRef(false);
+  useEffect(() => {
+    if (handedOver.current) return;
+    const q = new URLSearchParams(location.search);
+    const u = q.get("url");
+    if (q.get("go") !== "1" || !u) return;
+    handedOver.current = true;
+    history.replaceState(null, "", "/");
+    const nat = q.get("native") === "1", sh = q.get("shots") === "1";
+    setTimeout(() => {
+      setUrl(u); setNative(nat); setShots(sh);
+      start("", u, nat, sh, true);
+    }, 0);
+  }, [start]);
 
   return (
     <main
@@ -384,13 +417,7 @@ export default function Home() {
         </div>
 
         <div className="-mt-1 flex shrink-0 items-center gap-2">
-        <span
-          title={ON_PC ? "transcribing and summarising on the RTX 5090" : "the PC is off, so this Mac does the work"}
-          className="flex items-center gap-1.5 rounded-lg px-1.5 py-1.5 text-[12px] text-soft"
-        >
-          <span className={`h-1.5 w-1.5 rounded-full ${ON_PC ? "bg-good" : "bg-soft/50"}`} />
-          {ON_PC ? "on the PC" : "on this Mac"}
-        </span>
+        <EngineLabel />
         <Link
           href="/research"
           title="a topic in: ten videos, one brief"
@@ -587,6 +614,7 @@ export default function Home() {
           }}
         />
       )}
+      {busyDialog}
     </main>
   );
 }

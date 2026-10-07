@@ -53,12 +53,15 @@ wait_for() { for _ in $(seq 1 60); do up "$1" && return 0; sleep 0.5; done; retu
 # an NVIDIA GPU over Tailscale) and it answers, it does the work and the Mac's memory stays
 # free; otherwise the Mac's own engine, exactly as before. The choice reaches the page through
 # YTGIST_ENGINE, read by Next at request time.
+#
+# This Mac's engine runs EITHER WAY. With the PC chosen it sits idle (no model loaded) as the
+# fallback the page offers when the PC's GPU is busy ("Run on this Mac").
+up 8765 || ( cd "$REPO" && ./serve & )
 PC="${YTGIST_REMOTE:-$(cat "$HOME/.ytgist/remote" 2>/dev/null)}"
 if [ -n "$PC" ] && curl -sf -m 2 -o /dev/null "$PC/api/limits"; then
   export YTGIST_ENGINE="$PC"
 else
   export YTGIST_ENGINE=""
-  up 8765 || ( cd "$REPO" && ./serve & )
 fi
 echo "engine: ${YTGIST_ENGINE:-this Mac}"
 # A web server started earlier for the OTHER engine keeps its choice; restart it so the page

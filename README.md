@@ -420,7 +420,14 @@ libraries. `YTGIST_ENGINE=mac ./ui` forces the Mac.
 
 **Sharing the GPU.** If other things use the same card, set `YTGIST_SHED` to a booking service
 (see [`shed.py`](shed.py) for the four endpoints). ytgist books the GPU before each job, waits
-while someone else holds it, and holds nothing on the GPU when idle.
+while someone else holds it (or while ComfyUI renders without a booking), and holds nothing
+on the GPU when idle.
+
+**When the PC is busy.** Before a new gist or research goes to the PC, the page asks its
+`GET /api/gpu`. If someone else holds the GPU, ComfyUI is rendering, or a research run is
+going, a dialog says who and offers **Run on this Mac** or **Wait for the PC**. The Mac's
+engine is started by the launcher either way (idle, it holds no model), so the switch is
+instant. A switched window says **on this Mac · use the PC** until you click back or close it.
 
 | variable | default | what |
 |---|---|---|

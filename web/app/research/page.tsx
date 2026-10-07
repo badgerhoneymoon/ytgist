@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Check, Clock, Copy, Loader2, X } from "lucide-react";
-import { ENGINE, ON_PC } from "../engine";
+import { ENGINE, switchEngine } from "../engine";
+import { EngineLabel, useBusyGate } from "../BusyGate";
 import { Shot } from "../Result";
 
 /** Research mode: a topic → the ~10 most useful videos → one brief across all of them.
@@ -263,6 +264,7 @@ export default function ResearchPage() {
   // the box comes from the engine's own measurements, so it is this machine's, not a guess.
   const [shots, setShots] = useState(false);
   const [est, setEst] = useState<{ plain: number; shots: number } | null>(null);
+  const [gate, busyDialog] = useBusyGate();
   useEffect(() => {
     fetch(`${ENGINE}/api/limits`).then((r) => r.json()).then((d) => d.research && setEst(d.research)).catch(() => {});
   }, []);
@@ -307,13 +309,24 @@ export default function ResearchPage() {
     return () => clearInterval(t);
   }, [runId, runStatus, open]);
 
-  async function start() {
-    if (topic.trim().length < 3) return;
+  const start = useCallback(async (topicOverride?: string, shotsOverride?: boolean, skipGate?: boolean) => {
+    const t = (topicOverride ?? topic).trim();
+    const sh = shotsOverride ?? shots;
+    if (t.length < 3) return;
     setBusy(true); setErr("");
     try {
+      // Ask first whether the PC's GPU is free; if not, the research can go to this Mac.
+      if (!skipGate) {
+        const where = await gate("this research");
+        if (where === "cancel") return;
+        if (where === "mac") {
+          switchEngine("mac", `/research?topic=${encodeURIComponent(t)}&shots=${sh ? 1 : 0}&go=1`);
+          return;
+        }
+      }
       const r = await fetch(`${ENGINE}/api/research`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic: topic.trim(), n: 10, shots }),
+        body: JSON.stringify({ topic: t, n: 10, shots: sh }),
       });
       const d = await r.json();
       if (d.error) setErr(d.error);
@@ -321,7 +334,21 @@ export default function ResearchPage() {
     } catch {
       setErr(`Engine not reachable at ${ENGINE}`);
     } finally { setBusy(false); }
-  }
+  }, [topic, shots, gate, open, loadRuns]);
+
+  // The hand-over from the PC: "Run on this Mac" reloads this window on the Mac's engine with
+  // the topic in the address, and it starts here, once, without asking again.
+  const handedOver = useRef(false);
+  useEffect(() => {
+    if (handedOver.current) return;
+    const q = new URLSearchParams(location.search);
+    const t = q.get("topic");
+    if (q.get("go") !== "1" || !t) return;
+    handedOver.current = true;
+    history.replaceState(null, "", "/research");
+    const sh = q.get("shots") === "1";
+    setTimeout(() => { setShots(sh); start(t, sh, true); }, 0);
+  }, [start]);
 
   async function post(path: string, body?: object) {
     await fetch(`${ENGINE}${path}`, {
@@ -354,10 +381,7 @@ export default function ResearchPage() {
             A topic in. Up to ten videos that are about it, and one brief across all of them.
           </p>
         </div>
-        <span className="-mt-1 flex shrink-0 items-center gap-1.5 px-1.5 py-1.5 text-[12px] text-soft">
-          <span className={`h-1.5 w-1.5 rounded-full ${ON_PC ? "bg-good" : "bg-soft/50"}`} />
-          {ON_PC ? "on the PC" : "on this Mac"}
-        </span>
+        <div className="-mt-1 shrink-0"><EngineLabel /></div>
       </header>
 
       <form onSubmit={(e) => { e.preventDefault(); start(); }} className="flex gap-2">
@@ -442,6 +466,28 @@ export default function ResearchPage() {
             </div>
           )}
 
+
+          {run.report && rows.length > 0 && (
+            <div className="mt-6">
+              <p className="text-[11.5px] font-semibold uppercase tracking-[0.1em] text-soft">
+                Based on {rows.length} video{rows.length > 1 ? "s" : ""}
+              </p>
+              <ol className="mt-2 divide-y divide-line border-y border-line">
+                {rows.map((p) => (
+                  <li key={p.id} title={p.why || undefined}
+                      className="grid grid-cols-[2.2rem_minmax(0,1fr)] items-baseline gap-x-2 py-2 sm:grid-cols-[2.2rem_minmax(0,1fr)_auto]">
+                    <span className="font-mono text-[12px] text-soft">V{p.k}</span>
+                    <a href={`https://youtu.be/${p.id}`} target="_blank" rel="noopener noreferrer"
+                       className="truncate text-[14px] font-medium text-ink hover:text-accent">{p.title}</a>
+                    <span className="whitespace-nowrap text-[12.5px] text-soft max-sm:col-start-2">
+                      {p.channel} · {dur(p.duration)}<Age ts={p.ts} now={run.created} />
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
+
           {run.report?.takeaways ? (
             <div className="mt-6">
               {run.report.tldr && (
@@ -460,10 +506,10 @@ export default function ResearchPage() {
             </div>
           ) : null}
 
-          {rows.length > 0 && (
+          {!run.report && rows.length > 0 && (
             <>
               <h3 className="mb-3 mt-10 text-[11.5px] font-semibold uppercase tracking-[0.1em] text-soft">
-                {run.report ? "Sources" : `Videos · ${done} of ${picks.length}`}
+                {`Videos · ${done} of ${picks.length}`}
               </h3>
               <div className="space-y-2">
                 {rows.map((p) => (
@@ -479,7 +525,7 @@ export default function ResearchPage() {
                       </span>
                     </span>
                     <span className="flex items-center gap-3 whitespace-nowrap text-[12.5px]">
-                      {!run.report && <Status s={p.status} />}
+                      <Status s={p.status} />
                       {live && p.status !== "succeeded" && (
                         <button title="leave this video out"
                                 onClick={() => post(`/api/research/${run.id}/drop`, { video: p.id })}
@@ -510,6 +556,7 @@ export default function ResearchPage() {
           </div>
         </section>
       )}
+      {busyDialog}
     </main>
   );
 }

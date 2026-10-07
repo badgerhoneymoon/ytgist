@@ -38,7 +38,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     // mismatches inside the app still throw.
     <html lang="en" className={serif.variable} suppressHydrationWarning>
       <head>
-        <script dangerouslySetInnerHTML={{ __html: `window.__YTGIST_ENGINE__=${engine}` }} />
+        {/* Runs before the app's scripts: a window switched to the Mac (the PC was busy)
+            talks to the Mac from its first fetch. See engine.ts. */}
+        <script dangerouslySetInnerHTML={{ __html:
+          `window.__YTGIST_PC__=${engine};window.__YTGIST_ENGINE__=${engine};` +
+          `try{if(window.__YTGIST_PC__&&sessionStorage.getItem("ytgist-on")==="mac")window.__YTGIST_ENGINE__=""}catch(e){}` }} />
       </head>
       <body className="antialiased">{children}</body>
     </html>
