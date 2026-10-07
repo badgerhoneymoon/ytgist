@@ -3,7 +3,15 @@
 # One command, because two terminals for a personal tool is friction that compounds.
 set -e
 cd "$(dirname "$0")"
-pkill -f "ytgist/serve.py" 2>/dev/null || true
-./serve > /tmp/ytgist-serve.log 2>&1 &
-echo "engine  → http://127.0.0.1:8765  (log: /tmp/ytgist-serve.log)"
+# The PC's engine when the PC is on (YTGIST_ENGINE=mac forces this Mac's own).
+PC="http://desktop-8rqc3fq:8766"
+if [ "$YTGIST_ENGINE" != "mac" ] && curl -sf -m 2 -o /dev/null "$PC/api/limits"; then
+  export YTGIST_ENGINE="$PC"
+  echo "engine  → $PC  (the PC)"
+else
+  export YTGIST_ENGINE=""
+  pkill -f "ytgist/serve.py" 2>/dev/null || true
+  ./serve > /tmp/ytgist-serve.log 2>&1 &
+  echo "engine  → http://127.0.0.1:8765  (log: /tmp/ytgist-serve.log)"
+fi
 cd web && exec npm run dev

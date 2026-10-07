@@ -25,6 +25,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gpu
+import research
+import shed
 import timing_log
 import ytgist
 
@@ -105,6 +107,9 @@ def _snapshot():
     return cur
 
 PORT = int(os.environ.get("YTGIST_PORT", "8765"))
+# 127.0.0.1 unless told otherwise. On the PC it is the tailnet (Denis's own devices only),
+# because the Mac's page has to reach it; see the BOUND TO 127.0.0.1 note at the top.
+HOST = os.environ.get("YTGIST_HOST", "127.0.0.1")
 # Created only by the engine entry point (tests inject a temporary store).
 _store = None
 _worker_stop = threading.Event()
@@ -400,8 +405,38 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("A JSON object is required.")
         return req
 
+    def _html(self, text, status=200, ctype="text/html; charset=utf-8"):
+        body = text.encode()
+        self.send_response(status)
+        self._cors()
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         path = urlparse(self.path).path
+        # RESEARCH MODE: a topic → ~10 videos → one brief (research.py).
+        if path == "/api/research":
+            query = parse_qs(urlparse(self.path).query)
+            limit = max(1, min(int((query.get("limit") or ["20"])[0] or 20), 100))
+            return self._json({"runs": research.list_runs(limit), "active": research._active["id"]})
+        m = re.fullmatch(r"/api/research/([0-9a-f]{12})", path)
+        if m:
+            r = research.load(m.group(1))
+            return self._json(r if r else {"error": "No such research."}, 200 if r else 404)
+        m = re.fullmatch(r"/research/([0-9a-f]{12})(\.md)?", path)
+        if m:
+            r = research.load(m.group(1))
+            if not r:
+                return self._html("No such research.", 404, "text/plain; charset=utf-8")
+            if m.group(2):
+                try:
+                    with open(os.path.join(research.DIR, r["id"] + ".md"), encoding="utf-8") as f:
+                        return self._html(f.read(), 200, "text/markdown; charset=utf-8")
+                except OSError:
+                    return self._html("Not finished yet.", 404, "text/plain; charset=utf-8")
+            return self._html(research.page(r))
         if path == "/api/video":
             query = parse_qs(urlparse(self.path).query)
             vid = (query.get("v") or [""])[0]
@@ -618,7 +653,7 @@ class Handler(BaseHTTPRequestHandler):
             req = json.loads(self.rfile.read(n) or b"{}") or {}
             # Takes the SAME run lock as a gist. Expanding starts a model server, and two
             # of those is how we lost a run this morning.
-            with _RUN:
+            with _RUN, shed.hold("more detail on a takeaway"):
                 try:
                     text = ytgist.expand(
                         req.get("video", ""), float(req.get("start") or 0),
@@ -635,6 +670,21 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path == "/api/research":
+            try:
+                req = self._request()
+                rid = research.start(req.get("topic", ""), req.get("n", 10), bool(req.get("native")))
+            except research.Busy as exc:
+                return self._json({"error": str(exc)}, 409)
+            except (ValueError, TypeError) as exc:
+                return self._json({"error": str(exc)}, 400)
+            return self._json({"id": rid})
+        m = re.fullmatch(r"/api/research/([0-9a-f]{12})/(cancel|drop)", self.path)
+        if m:
+            req = self._request() if m.group(2) == "drop" else {}
+            ok = (research.cancel(m.group(1)) if m.group(2) == "cancel"
+                  else research.drop(m.group(1), str(req.get("video", ""))))
+            return self._json({"ok": ok})
         if self.path == "/api/cancel":
             try:
                 job = self._request().get("job", "")
@@ -699,10 +749,13 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if ctl and ctl.cancelled.is_set():
                     raise ytgist.Cancelled()
-                decisions, outcome = ytgist.find_frames(
-                    req.get("url", ""), req.get("video", ""),
-                    native=bool(req.get("native")),
-                    progress=lambda f: q.put(f), control=ctl)
+                with shed.hold("finding screenshots",
+                               wait_msg=lambda t: q.put({"stage": "frames", "pct": 2, "msg": t}),
+                               cancelled=lambda: bool(ctl and ctl.cancelled.is_set())):
+                    decisions, outcome = ytgist.find_frames(
+                        req.get("url", ""), req.get("video", ""),
+                        native=bool(req.get("native")),
+                        progress=lambda f: q.put(f), control=ctl)
                 if ctl and ctl.cancelled.is_set():
                     raise ytgist.Cancelled()
                 q.put({"frames": decisions, "frames_outcome": outcome, "frames_done": True})
@@ -781,11 +834,18 @@ class Handler(BaseHTTPRequestHandler):
 
             threading.Thread(target=beat, daemon=True).start()
             try:
-                ytgist.run(req.get("url", ""), req.get("model", "dense"),
-                           refresh=bool(req.get("refresh")), progress=progress,
-                           native=bool(req.get("native")),
-                           regen=bool(req.get("regen")), control=ctl,
-                           shots=bool(req.get("shots")))
+                # THE PC'S GPU IS SHARED. Book it (or wait, saying for whom) before anything
+                # lands on it; a no-op on the Mac.
+                with shed.hold("summarising a video",
+                               wait_msg=lambda t: progress({"stage": "check", "pct": 1, "msg": t}),
+                               cancelled=lambda: bool(ctl and ctl.cancelled.is_set())):
+                    ytgist.run(req.get("url", ""), req.get("model", "dense"),
+                               refresh=bool(req.get("refresh")), progress=progress,
+                               native=bool(req.get("native")),
+                               regen=bool(req.get("regen")), control=ctl,
+                               shots=bool(req.get("shots")))
+            except InterruptedError:
+                raise ytgist.Cancelled()
             finally:
                 stop.set()
                 sampler.stop()
@@ -865,11 +925,20 @@ if __name__ == "__main__":
     for _sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(_sig, _bye)
 
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    srv = ThreadingHTTPServer((HOST, PORT), Handler)
     # Bind first: a second engine cannot open/recover the live engine's job database.
     _store = JobStore(os.environ.get("YTGIST_JOBS_DB", os.path.expanduser("~/.ytgist/jobs.sqlite3")))
     _start_worker()
-    print(f"ytgist → http://127.0.0.1:{PORT}   (ctrl-c to stop)")
+    def _cancel_job(job):
+        with _store.changed:
+            ok = _store.cancel(job)
+            ctl = _ctl.get(job)
+            if ctl and ok:
+                ctl.stop()
+        return ok
+
+    research.attach(_store, _RUN, _cancel_job)
+    print(f"ytgist → http://{HOST}:{PORT}   (ctrl-c to stop)")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

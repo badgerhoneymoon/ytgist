@@ -34,7 +34,16 @@ from youtube_ingest import IngestError
 
 CACHE = os.path.expanduser("~/.cache/ytgist")
 TMP = os.path.join(CACHE, "tmp")
-PARAKEET = "mlx-community/parakeet-tdt-0.6b-v3"     # multilingual: YouTube isn't English-only
+# THE SAME PARAKEET ON BOTH MACHINES. The Mac runs NVIDIA's weights through MLX; the PC runs
+# them through NeMo on CUDA. Each machine keeps its own cache, and the cache key below names the
+# backend, so a transcript is never reused across backends whose segmentation might differ.
+try:
+    import parakeet_mlx as _pk_probe   # noqa: F401  (Apple Silicon)
+    ASR = "mlx"
+    PARAKEET = "mlx-community/parakeet-tdt-0.6b-v3"  # multilingual: YouTube isn't English-only
+except ImportError:
+    ASR = "nemo"
+    PARAKEET = "nvidia/parakeet-tdt-0.6b-v3"
 CHUNK, OVERLAP = 120.0, 15.0
 CACHE_V = 1
 # MEASURED per-minute-of-video costs, from real runs on this machine (M4 Max, 27B Q5):
@@ -475,7 +484,7 @@ def load_cached(vid):
 def _parakeet_version():
     try:
         from importlib.metadata import version
-        return version("parakeet-mlx")
+        return version("parakeet-mlx") if ASR == "mlx" else "nemo-" + version("nemo_toolkit")
     except Exception:
         return "?"
 
@@ -615,6 +624,95 @@ def history():
 
 
 def transcribe(wav_path):
+    if ASR == "nemo":
+        return _transcribe_nemo(wav_path)
+    return _transcribe_mlx(wav_path)
+
+
+# NeMo's model stays loaded between videos for a short while: a research run transcribes ten
+# in a row, and reloading 2.5 GB each time would cost more than the transcription itself. It
+# is released after NEMO_IDLE seconds so nothing sits on the GPU when ytgist is idle (the PC
+# is shared with video rendering).
+NEMO_IDLE = float(os.environ.get("YTGIST_NEMO_IDLE", "90"))
+_nemo = {"m": None, "last": 0.0, "timer": None, "busy": 0}
+_nemo_lock = __import__("threading").Lock()
+_SENT_END = re.compile(r"[.!?…。！？][\"')\]]*$")
+
+
+def _nemo_release():
+    with _nemo_lock:
+        if _nemo["m"] is None or _nemo["busy"] or time.time() - _nemo["last"] < NEMO_IDLE - 1:
+            return
+        _nemo["m"] = None
+    import gc
+    gc.collect()
+    try:
+        import torch
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def _nemo_model():
+    import threading
+    with _nemo_lock:
+        if _nemo["m"] is None:
+            import logging
+            logging.getLogger("nemo_logger").setLevel(logging.ERROR)
+            import nemo.collections.asr as nemo_asr
+            m = nemo_asr.models.ASRModel.from_pretrained(PARAKEET, map_location="cuda")
+            m.eval()
+            # NVIDIA's recipe for long audio: local attention + chunked subsampling keep
+            # memory flat, so an hour-long talk goes through in one pass.
+            m.change_attention_model("rel_pos_local_attn", [256, 256])
+            m.change_subsampling_conv_chunking_factor(1)
+            _nemo["m"] = m
+        _nemo["last"] = time.time()
+        if _nemo["timer"] is not None:
+            _nemo["timer"].cancel()
+        _nemo["timer"] = threading.Timer(NEMO_IDLE, _nemo_release)
+        _nemo["timer"].daemon = True
+        _nemo["timer"].start()
+        return _nemo["m"]
+
+
+def _transcribe_nemo(wav_path):
+    """Same output as the MLX path: sentences with start/end, capped at 30 s.
+
+    Built from WORD timestamps rather than NeMo's own segments, so the 30-second cap works
+    exactly like parakeet-mlx's max_duration: punctuation-poor speech must not become one
+    enormous block with a single timestamp."""
+    import torch
+    m = _nemo_model()
+    _nemo["busy"] += 1
+    try:
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+            out = m.transcribe([wav_path], timestamps=True, batch_size=1, verbose=False)
+    finally:
+        _nemo["busy"] -= 1
+        _nemo["last"] = time.time()
+    words = (out[0].timestamp or {}).get("word") or []
+    sentences, cur = [], []
+
+    def flush():
+        if cur:
+            sentences.append({"start": float(cur[0]["start"]), "end": float(cur[-1]["end"]),
+                              "text": " ".join(w["word"] for w in cur).strip()})
+            cur.clear()
+
+    for w in words:
+        if not str(w.get("word", "")).strip():
+            continue
+        if cur and float(w["end"]) - float(cur[0]["start"]) > 30.0:
+            flush()
+        cur.append(w)
+        if _SENT_END.search(w["word"]):
+            flush()
+    flush()
+    return sentences
+
+
+def _transcribe_mlx(wav_path):
     """Chunked, so memory stays bounded and throughput stays constant.
 
     MEASURED on this M4 Max: one-shot 10min = 44x realtime and +8.4GB; chunked 30min =

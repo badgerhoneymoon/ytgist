@@ -14,6 +14,7 @@ import {
 import type { Gist, Takeaway } from "./types";
 import Cited from "./Cited";
 import { parseCited } from "./parse";
+import { ENGINE } from "./engine";
 
 /** The reading surface.
  *
@@ -442,7 +443,6 @@ const COLORS: Record<string, string> = {
   images: "#7A6E9E",
 };
 
-const ENGINE = "http://127.0.0.1:8765";
 
 function Step({
   n,

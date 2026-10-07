@@ -11,7 +11,7 @@ const nextConfig: NextConfig = {
   // spellings of "this machine" restores it.
   allowedDevOrigins: ["127.0.0.1", "localhost", "127.0.0.1:3210", "localhost:3210"],
   async rewrites() {
-    return [{ source: "/api/:path*", destination: "http://127.0.0.1:8765/api/:path*" }];
+    return [{ source: "/api/:path*", destination: `${process.env.YTGIST_ENGINE || "http://127.0.0.1:8765"}/api/:path*` }];
   },
 };
 export default nextConfig;

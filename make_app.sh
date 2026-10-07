@@ -48,7 +48,24 @@ wait_for() { for _ in $(seq 1 60); do up "$1" && return 0; sleep 0.5; done; retu
 
 # The ENGINE owns transcription and the model; the WEB server is just the interface.
 # Started separately and only if down, so launching twice never doubles either one.
-up 8765 || ( cd "$REPO" && ./serve & )
+#
+# THE PC FIRST. When Denis's PC (RTX 5090, over Tailscale) answers, its engine does the work
+# and the Mac's memory stays free; otherwise the Mac's own engine, exactly as before. The
+# choice reaches the page through YTGIST_ENGINE, read by Next at request time.
+PC="http://desktop-8rqc3fq:8766"
+if curl -sf -m 2 -o /dev/null "$PC/api/limits"; then
+  export YTGIST_ENGINE="$PC"
+else
+  export YTGIST_ENGINE=""
+  up 8765 || ( cd "$REPO" && ./serve & )
+fi
+echo "engine: ${YTGIST_ENGINE:-this Mac}"
+# A web server started earlier for the OTHER engine keeps its choice; restart it so the page
+# follows the PC being switched on or off.
+if up 3210 && [ "$(cat /tmp/ytgist-engine 2>/dev/null)" != "$YTGIST_ENGINE" ]; then
+  pkill -f "next start -p 3210"; for _ in $(seq 1 20); do up 3210 || break; sleep 0.3; done
+fi
+echo "$YTGIST_ENGINE" > /tmp/ytgist-engine
 
 # Production build, not `next dev`: dev takes ~4s to first paint and recompiles on every
 # navigation. Built once here if missing, then served.
@@ -58,7 +75,7 @@ if ! up 3210; then
   ( cd "$REPO/web" && npm run start & )
 fi
 
-wait_for 8765 || { osascript -e 'display alert "ytgist" message "The engine did not start. See ~/Library/Logs/ytgist.log"'; exit 1; }
+[ -n "$YTGIST_ENGINE" ] || wait_for 8765 || { osascript -e 'display alert "ytgist" message "The engine did not start. See ~/Library/Logs/ytgist.log"'; exit 1; }
 wait_for 3210 || { osascript -e 'display alert "ytgist" message "The web server did not start. See ~/Library/Logs/ytgist.log"'; exit 1; }
 
 # --app= gives a window with no tabs and no address bar — the whole difference between

@@ -49,8 +49,28 @@ def _total_ram_gb() -> float:
         return 64.0          # assume the machine this was built on rather than cripple it
 
 
-_RAM_GB = _total_ram_gb()
-_OVERHEAD_GB = 4.0           # macOS, a browser, the dev server — measured, not guessed
+def _cuda_vram_gb() -> float:
+    """Total VRAM of an NVIDIA GPU, or 0 on a Mac. On the PC the whole model lives on the GPU,
+    so VRAM, not system RAM, is what a context has to fit in."""
+    import shutil
+    smi = shutil.which("nvidia-smi") or ("/usr/lib/wsl/lib/nvidia-smi"
+                                         if os.path.exists("/usr/lib/wsl/lib/nvidia-smi") else None)
+    if not smi:
+        return 0.0
+    try:
+        out = subprocess.run([smi, "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=5).stdout
+        return int(out.split()[0]) / 1024
+    except Exception:
+        return 0.0
+
+
+_VRAM_GB = _cuda_vram_gb()
+CUDA = _VRAM_GB > 0
+# On CUDA the budget is the card. The overhead covers the CUDA context, compute buffers and
+# Parakeet (~1.5 GB) staying loaded between videos during a research run.
+_RAM_GB = _VRAM_GB if CUDA else _total_ram_gb()
+_OVERHEAD_GB = 3.5 if CUDA else 4.0   # macOS, a browser, the dev server — measured, not guessed
 # Calibrated against this machine: a 20GB model at a 64k context measured 3.2GB of KV and
 # compute buffers, which is 0.08 GB per GB of model per 32k of context.
 _KV_GB_PER_GB_PER_32K = 0.08
@@ -180,7 +200,7 @@ ALIAS = "ytgist-owned"          # the marker that makes orphan cleanup safe
 # HOW LONG A FINISHED SERVER STAYS PARKED. Five minutes is free on a 64GB machine and
 # hostile on an 8GB one, where those gigabytes are the difference between the browser being
 # responsive and the machine swapping. Small memory, short parking.
-IDLE = 300 if _RAM_GB >= 24 else 45
+IDLE = float(os.environ.get("YTGIST_IDLE", 300 if _RAM_GB >= 24 else 45))
 
 
 def _ctx_max():
@@ -385,6 +405,8 @@ class Server:
                "--cache-type-k", "q8_0", "--cache-type-v", "q8_0",
                "--port", str(port), "--reasoning", "off", "--reasoning-budget", "0",
                "--alias", ALIAS]
+        if CUDA:
+            cmd += ["-ngl", "999"]            # every layer on the GPU (Metal does this by default)
         if mmproj:
             # NO --cache-reuse HERE. llama.cpp disables chunk cache reuse and context
             # shifting for a multimodal server anyway and says so on startup; passing it

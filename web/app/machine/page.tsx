@@ -3,8 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import Machine from "../Machine";
 import type { GpuSample } from "../types";
+import { ENGINE } from "../engine";
 
-const ENGINE = "http://127.0.0.1:8765";
 
 /** A design surface for the machine readout.
  *
@@ -29,7 +29,7 @@ export default function MachinePage() {
         }
         setErr("");
       } catch {
-        setErr("engine not reachable on :8765");
+        setErr(`engine not reachable at ${ENGINE}`);
       }
     }, 1000);
     return () => clearInterval(id);

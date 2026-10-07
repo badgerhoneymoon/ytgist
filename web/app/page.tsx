@@ -7,11 +7,12 @@ import History from "./History";
 import Preview from "./Preview";
 import Progress from "./Progress";
 import Result from "./Result";
+import { ENGINE } from "./engine";
+import Link from "next/link";
 
 // DIRECT to the engine, NOT through Next's rewrite: the rewrite buffers server-sent
 // events, so a job would finish server-side while the page waited forever without
 // receiving a single frame.
-const ENGINE = "http://127.0.0.1:8765";
 
 const YT_ID = /(?:v=|youtu\.be\/|\/shorts\/|\/embed\/|\/live\/)([A-Za-z0-9_-]{11})/;
 const YT_HOSTS = /^(www\.|m\.|music\.)?(youtube\.com|youtu\.be|youtube-nocookie\.com)$/;
@@ -382,13 +383,28 @@ export default function Home() {
           </p>
         </div>
 
+        <div className="-mt-1 flex shrink-0 items-center gap-2">
+        <Link
+          href="/research"
+          title="a topic in: ten videos, one brief"
+          className="flex items-center gap-2 rounded-lg border border-line px-2.5 py-1.5
+                     text-[12.5px] font-medium text-soft transition-colors duration-150
+                     hover:border-ink hover:text-ink focus-visible:outline-2
+                     focus-visible:outline-offset-2 focus-visible:outline-accent"
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden fill="none"
+               stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+            <circle cx="6" cy="6" r="4" /><path d="M9 9l3 3" />
+          </svg>
+          Research
+        </Link>
         {libCount > 0 && (
           <button
             onClick={() =>
               document.getElementById("library")?.scrollIntoView({ behavior: "smooth" })
             }
             title="everything you have summarised"
-            className="group -mt-1 flex shrink-0 items-center gap-2 rounded-lg border border-line
+            className="group flex shrink-0 items-center gap-2 rounded-lg border border-line
                        px-2.5 py-1.5 text-[12.5px] font-medium text-soft
                        transition-colors duration-150 hover:border-ink hover:text-ink
                        focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
@@ -401,6 +417,7 @@ export default function Home() {
             <span className="tabular-nums text-soft/60 group-hover:text-soft">{libCount}</span>
           </button>
         )}
+        </div>
       </header>
 
       <form

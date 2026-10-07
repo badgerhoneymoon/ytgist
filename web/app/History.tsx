@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { ENGINE } from "./engine";
 
 export type HistoryRow = {
   id: string;
@@ -14,7 +15,6 @@ export type HistoryRow = {
   at: number;
 };
 
-const ENGINE = "http://127.0.0.1:8765";
 
 /** Everything ytgist has ever transcribed, newest first.
  *

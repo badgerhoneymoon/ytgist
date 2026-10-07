@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { ENGINE } from "./engine";
 
 type Meta = { id: string; title: string; author: string; thumb: string };
 /** Duration and this video's own estimate, from the engine. oEmbed does not carry length,
@@ -17,7 +18,6 @@ type Cost = {
   title: string;
 };
 
-const ENGINE = "http://127.0.0.1:8765";
 
 function hms(secs: number): string {
   const m = Math.floor(secs / 60);

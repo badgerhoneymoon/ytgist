@@ -26,12 +26,20 @@ export const metadata: Metadata = {
   description: "Paste a YouTube link, get the argument.",
 };
 
+// Rendered per request, so the engine the launcher chose (YTGIST_ENGINE, read at RUN time)
+// reaches the browser even from a production build, where NEXT_PUBLIC_* would be baked in.
+export const dynamic = "force-dynamic";
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  const engine = JSON.stringify(process.env.YTGIST_ENGINE || "");
   return (
     // suppressHydrationWarning covers ONLY this element's attributes. Browser extensions
     // (Immersive Translate) stamp attributes onto <html> before React hydrates; real
     // mismatches inside the app still throw.
     <html lang="en" className={serif.variable} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: `window.__YTGIST_ENGINE__=${engine}` }} />
+      </head>
       <body className="antialiased">{children}</body>
     </html>
   );

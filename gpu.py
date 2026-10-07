@@ -19,6 +19,7 @@ So: degrees when macmon is installed, load either way.
 """
 import collections
 import json
+import os
 import re
 import subprocess
 import threading
@@ -61,10 +62,30 @@ def _macmon() -> dict:
     return got
 
 
+def _nvidia() -> dict:
+    """The PC's NVIDIA card through nvidia-smi, or {}. Never raises."""
+    import shutil
+    smi = shutil.which("nvidia-smi") or ("/usr/lib/wsl/lib/nvidia-smi"
+                                         if os.path.exists("/usr/lib/wsl/lib/nvidia-smi") else None)
+    if not smi:
+        return {}
+    try:
+        out = subprocess.run([smi, "--query-gpu=utilization.gpu,temperature.gpu,memory.used,power.draw",
+                              "--format=csv,noheader,nounits"], capture_output=True, text=True,
+                             timeout=5).stdout.split(",")
+        return {"util": round(float(out[0])), "gpu_c": round(float(out[1])),
+                "mem_gb": round(float(out[2]) / 1024, 1), "watts": round(float(out[3]))}
+    except Exception:
+        return {}
+
+
 def stats() -> dict:
     """Everything we can see about the GPU. Empty dict if nothing is available.
 
     Never raises — a monitoring readout must not be able to fail a summary."""
+    nv = _nvidia()
+    if nv:
+        return nv
     got = _macmon()
     try:
         out = subprocess.run(
