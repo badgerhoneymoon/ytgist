@@ -524,6 +524,8 @@ TL;DR <3-4 sentences: the answer to the topic, as these videos give it together>
 
 Rules:
 - Headlines in sentence case, like a sentence, not Title Case.
+- Plain text only in the TL;DR and the takeaway bodies: no bold, no bullet lists, no headings.
+  The TL;DR is one paragraph on the line that starts with "TL;DR".
 - {steps} numbered takeaways, ordered so that reading only the bold headlines gives the
   shape of the answer. Combine what several videos say into one takeaway; do not go video by video.
 - Every takeaway and every point cites at least one source as [V<k> <mm:ss>], with a
@@ -567,7 +569,22 @@ def _said(vid, secs):
     return " ".join(near)[:480]
 
 
-def combine(r, stop=None):
+def _llm(writer, system, user, max_tokens, temperature, ctx_extra=1500, usage=None):
+    """One call to whichever model writes this brief: the local one, or Claude (a model id
+    like "claude-sonnet-5-5"). Token usage of Claude calls is added to `usage`."""
+    if writer and writer.startswith("claude"):
+        import claude_client
+        text, u = claude_client.chat(writer, system, user, max_tokens=max_tokens, temperature=temperature)
+        if usage is not None:
+            for k in ("input_tokens", "output_tokens"):
+                usage[k] = usage.get(k, 0) + int(u.get(k) or 0)
+        return text
+    with (_run_lock or threading.Lock()):
+        with model_client.Server.acquire(len(user) // 2 + ctx_extra, log=lambda *_: None) as srv:
+            return srv.chat(system, user, max_tokens=max_tokens, temperature=temperature)
+
+
+def combine(r, stop=None, writer=None):
     sources, blocks, stamps = [], [], {}
     for p in r["picks"]:
         if p["status"] != "succeeded":
@@ -587,15 +604,26 @@ def combine(r, stop=None):
     lang = "in the language most of these videos are in" if r["native"] else "in English"
     steps = "6-9" if len(sources) <= 5 else "8-12"
     user = f"Topic: {r['topic']}\n\n" + "\n\n".join(blocks)
-    with (_run_lock or threading.Lock()):
-        if stop is not None and stop.is_set():
-            raise InterruptedError
-        with model_client.Server.acquire(len(user) // 2 + 4500, log=lambda *_: None) as srv:
-            if srv.count_tokens(user) + 4500 > srv.ctx:
-                raise RuntimeError("Too much to combine in one pass; try fewer videos.")
-            raw = srv.chat(COMBINE_SYSTEM.format(lang=lang, steps=steps), user,
-                           max_tokens=4200, temperature=0.3)
-    return _structure(raw, sources, stamps, r["native"])
+    if stop is not None and stop.is_set():
+        raise InterruptedError
+    usage = {}
+    if writer and writer.startswith("claude"):
+        raw = _llm(writer, COMBINE_SYSTEM.format(lang=lang, steps=steps), user, 4200, 0.3, usage=usage)
+    else:
+        with (_run_lock or threading.Lock()):
+            with model_client.Server.acquire(len(user) // 2 + 4500, log=lambda *_: None) as srv:
+                if srv.count_tokens(user) + 4500 > srv.ctx:
+                    raise RuntimeError("Too much to combine in one pass; try fewer videos.")
+                raw = srv.chat(COMBINE_SYSTEM.format(lang=lang, steps=steps), user,
+                               max_tokens=4200, temperature=0.3)
+    rep = _structure(raw, sources, stamps, r["native"], writer=writer, usage=usage)
+    rep["writer"] = writer or "local"
+    rep["raw"] = raw
+    if usage:
+        import claude_client
+        rep["usage"] = usage
+        rep["cost_usd"] = claude_client.cost(writer, usage)
+    return rep
 
 
 _HEAD_STAMP = re.compile(r"^\s*\d+[.)]\s+\*\*.*?\*\*\s*\[(\d{1,2}:\d{2}(?::\d{2})?)\]", re.M)
@@ -637,7 +665,7 @@ def _window(vid, secs, before=10, after=40):
     return " ".join(near)[:700]
 
 
-def _check_support(takeaways):
+def _check_support(takeaways, writer=None, usage=None):
     """Does each cited moment actually say what its takeaway claims?
 
     The citation check in _structure only proves the timestamp exists in that video's summary,
@@ -661,16 +689,20 @@ def _check_support(takeaways):
     user = "\n\n".join(f"{n}. CLAIM: {takeaways[ti]['headline']}. {takeaways[ti]['body']}\n"
                         f"   QUOTE (V{c['k']} {c['stamp']}): {q}" for n, (ti, c, q) in enumerate(items, 1))
     try:
-        with (_run_lock or threading.Lock()):
-            with model_client.Server.acquire(len(user) // 2 + 1200, log=lambda *_: None) as srv:
-                raw = srv.chat(SUPPORT_SYSTEM, user, max_tokens=200 + 40 * len(items), temperature=0.0)
+        raw = _llm(writer, SUPPORT_SYSTEM, user, 200 + 40 * len(items), 0.0, ctx_extra=1200, usage=usage)
         m = re.search(r"\{.*\}", raw, re.S)
-        verdicts = (json.loads(m.group(0)).get("items") if m else None) or []
+        try:
+            verdicts = (json.loads(m.group(0)).get("items") if m else None) or []
+        except ValueError:
+            # A reason with a stray double quote in it breaks the JSON (seen with Claude, 8 Oct).
+            # The verdicts themselves are still plain: read them one by one.
+            verdicts = [{"n": int(n), "backs": b == "true", "why": w}
+                        for n, w, b in re.findall(r'"n"\s*:\s*(\d+)\s*,\s*"why"\s*:\s*"(.*?)"\s*,\s*"backs"\s*:\s*(true|false)', raw, re.S)]
         if not verdicts:
             raise ValueError("no verdicts")
         bad = {int(v["n"]) for v in verdicts if isinstance(v, dict) and v.get("backs") is False}
         reason = {int(v["n"]): str(v.get("why") or "")[:120] for v in verdicts if isinstance(v, dict)}
-    except (model_client.ModelError, ValueError, TypeError) as e:
+    except (model_client.ModelError, ValueError, TypeError, RuntimeError) as e:
         ytgist.log(f"  research: couldn't check the citations ({e}); keeping them")
         return 0, 0, []
     gone = [(items[n - 1][0], items[n - 1][1]) for n in sorted(bad) if 1 <= n <= len(items)]
@@ -690,7 +722,20 @@ def _check_support(takeaways):
     return len(gone), before - len(keep), removed
 
 
-def _structure(raw, sources, stamps, native=False):
+def _unbullet(line):
+    """A list item a model wrote anyway, kept readable inside one paragraph."""
+    return re.sub(r"^\s*[-*•]\s+", "• ", line)
+
+
+def _tidy(text):
+    """Spaces left where citations were cut out: "with ComfyUI ." -> "with ComfyUI.", and no
+    stray bold markers."""
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"\s+([.,;:!?])", r"\1", text)
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+def _structure(raw, sources, stamps, native=False, writer=None, usage=None):
     """The model's text → TL;DR, takeaways and extras, with every citation checked."""
     by_k = {s["k"]: s for s in sources}
     shots = {s["k"]: _shots_for(s, native) for s in sources}
@@ -729,8 +774,14 @@ def _structure(raw, sources, stamps, native=False):
         i += 1
         if not line:
             continue
-        if line.upper().startswith("TL;DR") or line.upper().startswith("TLDR"):
-            tldr = _CITE.sub("", re.sub(r"^TL;?DR[:\s]*", "", line, flags=re.I)).strip()
+        mt = re.match(r"^[*_#\s]*TL;?DR[*_\s]*:?[*_\s]*(.*)$", line, re.I)
+        if mt and not tldr:
+            parts = [mt.group(1)]
+            while i < len(lines) and lines[i].strip() and not _STEP.match(lines[i]) \
+                    and not lines[i].startswith("## "):
+                parts.append(lines[i].strip())
+                i += 1
+            tldr = _tidy(_CITE.sub("", " ".join(_unbullet(x) for x in parts if x)))
             continue
         if line.startswith("## "):
             section = line[3:].strip()
@@ -746,11 +797,11 @@ def _structure(raw, sources, stamps, native=False):
             while i < len(lines) and lines[i].strip() and not _STEP.match(lines[i]) and not lines[i].startswith("## "):
                 body.append(lines[i].strip())
                 i += 1
-            text = " ".join([rest] + body)
-            takeaways.append({"headline": _CITE.sub("", head).strip(" ."),
-                              "body": re.sub(r"\s{2,}", " ", _CITE.sub("", text)).strip(),
+            text = " ".join(_unbullet(x) for x in [rest] + body)
+            takeaways.append({"headline": _CITE.sub("", head).strip(" .*"),
+                              "body": _tidy(_CITE.sub("", text)),
                               "cites": cites_in(head + " " + text)})
-    unsupported, cut, removed = _check_support(takeaways)
+    unsupported, cut, removed = _check_support(takeaways, writer=writer, usage=usage)
     for t in takeaways:
         cites = t["cites"]
         said = [{"k": c["k"], "stamp": c["stamp"], "text": _said(c["id"], c["secs"])}
