@@ -507,7 +507,8 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/gpu"):
             # Is the GPU free for a new job? Someone else's booking, an unbooked ComfyUI render,
             # or a research run of our own all mean a wait; the page offers this Mac instead.
-            b = shed.busy()
+            # with Claude writing, a new job needs the card only for its transcript (~4 GB)
+            b = shed.busy(need_gb=ytgist.TRANSCRIBE_GB if models.is_claude("gist") else None)
             if not b and research._active.get("id"):
                 rr = research.load(research._active["id"]) or {}
                 b = {"who": "ytgist", "task": "research", "minutes": None,
@@ -883,7 +884,9 @@ class Handler(BaseHTTPRequestHandler):
                                refresh=bool(req.get("refresh")), progress=progress,
                                native=bool(req.get("native")),
                                regen=bool(req.get("regen")), control=ctl,
-                               shots=bool(req.get("shots")))
+                               shots=bool(req.get("shots")),
+                               # a research run's videos are background work: a person goes first
+                               interactive=not req.get("background"))
             except InterruptedError:
                 raise ytgist.Cancelled()
             finally:

@@ -356,13 +356,18 @@ def _keep_frame(url, vid, n, cell, at, cols, rows, per_tile, kept_sigs):
                 pass
 
 
-def _gpu(task, progress=None, control=None, stage="check", pct=1):
+TRANSCRIBE_GB = 4          # Parakeet on CUDA: ~2-4 GB. Booked as a share of the card, not all of it
+
+
+def _gpu(task, progress=None, control=None, stage="check", pct=1, gb=None, interactive=True):
     """Book the shared GPU (shed.py; a no-op without one), saying on the page who we are
-    waiting for. Stop works while waiting: the hold raises InterruptedError."""
+    waiting for. Stop works while waiting: the hold raises InterruptedError. gb=None takes the
+    whole card; a number shares it. interactive=False (research) waits behind a person."""
     return shed.hold(task,
                      wait_msg=(lambda t: progress({"stage": stage, "pct": pct, "msg": t}))
                      if progress else None,
-                     cancelled=(lambda: control.cancelled.is_set()) if control is not None else None)
+                     cancelled=(lambda: control.cancelled.is_set()) if control is not None else None,
+                     gb=gb, interactive=interactive)
 
 
 @contextlib.contextmanager
@@ -813,7 +818,7 @@ def _shots_into(result, url, vid, native, progress, control):
 
 
 def run(url, model_key="dense", refresh=False, progress=None,
-        native=False, regen=False, control=None, shots=False):
+        native=False, regen=False, control=None, shots=False, interactive=True):
     # run.last is a FUNCTION ATTRIBUTE and survives between calls. Every early return that
     # does not set it therefore leaves the PREVIOUS run's result sitting there for serve.py
     # to pick up — and a video with no speech served the last video's summary, silently,
@@ -890,7 +895,8 @@ def run(url, model_key="dense", refresh=False, progress=None,
             # THE GPU IS BOOKED FOR THE TRANSCRIPT ITSELF. With Claude writing the summary
             # this is the only part of a run that needs the card, so a render waits seconds
             # for it, not the whole run (joins the job's booking when it holds one).
-            with _gpu("transcribing a video", progress, control, "transcribe", 40):
+            with _gpu("transcribing a video", progress, control, "transcribe", 40,
+                      gb=TRANSCRIBE_GB, interactive=interactive):
                 t0 = time.time()
                 with phase("transcribe"):
                     sentences = transcribe(wav)

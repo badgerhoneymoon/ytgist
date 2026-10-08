@@ -57,7 +57,7 @@ def _hold(task, **kw):
     a render wait for nothing (each video's transcript job still books it for itself)."""
     if all(models.is_claude(s) for s in ("queries", "pick", "brief", "check")):
         return contextlib.nullcontext()
-    return shed.hold(task, **kw)
+    return shed.hold(task, interactive=False, **kw)       # research is background work
 
 
 # ----------------------------------------------------------------------- storage
@@ -477,7 +477,8 @@ def _gist_all(rid, stop, say):
         if p["status"] == "dropped":
             continue
         req = {"url": f"https://www.youtube.com/watch?v={p['id']}", "native": r["native"],
-               "model": "dense", "refresh": False, "regen": False, "shots": bool(r.get("shots"))}
+               "model": "dense", "refresh": False, "regen": False, "shots": bool(r.get("shots")),
+               "background": True}       # nobody waits on one video of a research run: it yields the GPU to a person
         item, _ = _store.submit("gist", req, f"research-{rid}-{p['id']}")
         p["job"] = item["id"]
     _save(r)
@@ -598,7 +599,7 @@ def _llm(writer, system, user, max_tokens, temperature, ctx_extra=1500, usage=No
             ytgist.log(f"  research: {writer} failed ({e}); using the local model instead")
     # The local model needs the GPU: one server at a time, and booked in the Shed (a no-op
     # inside a run that already holds the booking, or on a machine without one).
-    with (_run_lock or threading.Lock()), shed.hold("YouTube research"):
+    with (_run_lock or threading.Lock()), shed.hold("YouTube research", interactive=False):
         with model_client.Server.acquire(len(user) // 2 + ctx_extra, log=lambda *_: None) as srv:
             return srv.chat(system, user, max_tokens=max_tokens, temperature=temperature)
 
@@ -639,7 +640,7 @@ def combine(r, stop=None, writer=None, checker=None):
             ytgist.log(f"  research: {writer} failed ({e}); writing the brief with the local model")
             writer = models.LOCAL
     if raw is None:
-        with (_run_lock or threading.Lock()), shed.hold("YouTube research: writing the brief"):
+        with (_run_lock or threading.Lock()), shed.hold("YouTube research: writing the brief", interactive=False):
             with model_client.Server.acquire(len(user) // 2 + 4500, log=lambda *_: None) as srv:
                 if srv.count_tokens(user) + 4500 > srv.ctx:
                     raise RuntimeError("Too much to combine in one pass; try fewer videos.")
