@@ -24,7 +24,11 @@ from job_store import JobStore, Conflict, TERMINAL
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import contextlib
+
+import claude_client
 import gpu
+import models
 import research
 import shed
 import timing_log
@@ -497,6 +501,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith("/api/models"):
+            # Which model does which step on this engine right now (models.py).
+            return self._json({"steps": models.table(), "claude": claude_client.available()})
         elif self.path.startswith("/api/gpu"):
             # Is the GPU free for a new job? Someone else's booking, an unbooked ComfyUI render,
             # or a research run of our own all mean a wait; the page offers this Mac instead.
@@ -667,18 +674,27 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/expand":
             n = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(n) or b"{}") or {}
-            # Takes the SAME run lock as a gist. Expanding starts a model server, and two
-            # of those is how we lost a run this morning.
-            with _RUN, shed.hold("more detail on a takeaway"):
-                try:
-                    text = ytgist.expand(
-                        req.get("video", ""), float(req.get("start") or 0),
-                        float(req.get("end") or 0), req.get("headline", ""),
-                        req.get("body", ""), bool(req.get("native")))
-                    body = json.dumps({"text": text}).encode()
-                except Exception as exc:
-                    traceback.print_exc()
-                    body = json.dumps({"error": f"{type(exc).__name__}: {exc}"}).encode()
+            args = (req.get("video", ""), float(req.get("start") or 0),
+                    float(req.get("end") or 0), req.get("headline", ""),
+                    req.get("body", ""), bool(req.get("native")))
+            try:
+                text = None
+                # CLAUDE NEEDS NO LOCKS: no model server, no GPU. So a click during a running
+                # summary answers in seconds instead of waiting for the run to finish.
+                if models.is_claude("expand"):
+                    try:
+                        text = ytgist.expand(*args)
+                    except claude_client.ClaudeError as exc:
+                        ytgist.log(f"  expand: {exc}; using the local model")
+                if text is None:
+                    # Takes the SAME run lock as a gist. Expanding starts a model server, and
+                    # two of those is how we lost a run this morning.
+                    with _RUN, shed.hold("more detail on a takeaway"):
+                        text = ytgist.expand(*args, writer=models.LOCAL)
+                body = json.dumps({"text": text}).encode()
+            except Exception as exc:
+                traceback.print_exc()
+                body = json.dumps({"error": f"{type(exc).__name__}: {exc}"}).encode()
             self.send_response(200)
             self._cors()
             self.send_header("Content-Type", "application/json")
@@ -770,13 +786,12 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if ctl and ctl.cancelled.is_set():
                     raise ytgist.Cancelled()
-                with shed.hold("finding screenshots",
-                               wait_msg=lambda t: q.put({"stage": "frames", "pct": 2, "msg": t}),
-                               cancelled=lambda: bool(ctl and ctl.cancelled.is_set())):
-                    decisions, outcome = ytgist.find_frames(
-                        req.get("url", ""), req.get("video", ""),
-                        native=bool(req.get("native")),
-                        progress=lambda f: q.put(f), control=ctl)
+                # No booking here: find_frames books the GPU itself when the local model
+                # looks, and Claude needs none (models.py, "frames").
+                decisions, outcome = ytgist.find_frames(
+                    req.get("url", ""), req.get("video", ""),
+                    native=bool(req.get("native")),
+                    progress=lambda f: q.put(f), control=ctl)
                 if ctl and ctl.cancelled.is_set():
                     raise ytgist.Cancelled()
                 q.put({"frames": decisions, "frames_outcome": outcome, "frames_done": True})
@@ -856,10 +871,14 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=beat, daemon=True).start()
             try:
                 # THE PC'S GPU IS SHARED. Book it (or wait, saying for whom) before anything
-                # lands on it; a no-op on the Mac.
-                with shed.hold("summarising a video",
-                               wait_msg=lambda t: progress({"stage": "check", "pct": 1, "msg": t}),
-                               cancelled=lambda: bool(ctl and ctl.cancelled.is_set())):
+                # lands on it; a no-op on the Mac. When Claude writes the summary, the run
+                # books it only for the transcript (inside ytgist.run), so a render isn't
+                # held up by a summary that never touches the card.
+                local = req.get("model", "dense") != "dense" or not models.is_claude("gist")
+                with (shed.hold("summarising a video",
+                                wait_msg=lambda t: progress({"stage": "check", "pct": 1, "msg": t}),
+                                cancelled=lambda: bool(ctl and ctl.cancelled.is_set()))
+                      if local else contextlib.nullcontext()):
                     ytgist.run(req.get("url", ""), req.get("model", "dense"),
                                refresh=bool(req.get("refresh")), progress=progress,
                                native=bool(req.get("native")),

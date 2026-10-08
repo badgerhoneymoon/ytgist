@@ -132,6 +132,47 @@ def verify(output: str, sentences, video_id: str) -> tuple:
     return cleaned.strip(), dropped
 
 
+_TLDR_HEAD = re.compile(r"^[ \t]*[*_#>\s]*TL;?\s?DR\b[*_\s]*:?[*_\s]*(.*)$", re.I)
+_STEP_LINE = re.compile(r"^\s*\d+[.)]\s+\*\*")
+_RAW_STAMP = re.compile(r"\s*\[(\d{1,2}:\d{2}(?::\d{2})?)\]")
+
+
+def tidy(text: str) -> str:
+    """Put a summary into the one shape the page parses, whichever model wrote it. Runs
+    BEFORE verify, on the raw answer.
+
+    Two habits of Claude's (Haiku 5.5, 8 Oct) that the page could not read:
+      * "**TL;DR**" alone on a line, with the paragraph on the lines below. The page found no
+        TL;DR and showed "TL;DR" as takeaway 1. It becomes one line: "TL;DR <paragraph>".
+      * extra [MM:SS] inside a takeaway's sentences. The page showed them as raw link text.
+        Only the headline's own timestamp is kept; the sentences stay as they were.
+    """
+    lines = text.replace("\r", "").split("\n")
+    out, seen_tldr, i = [], False, 0
+    while i < len(lines):
+        line = lines[i]
+        m = None if seen_tldr else _TLDR_HEAD.match(line)
+        if m:
+            seen_tldr = True
+            parts = [m.group(1)]
+            j = i + 1
+            if not m.group(1).strip():               # a heading alone: skip blank lines to the text
+                while j < len(lines) and not lines[j].strip():
+                    j += 1
+            while j < len(lines) and lines[j].strip() and not _STEP_LINE.match(lines[j]):
+                parts.append(lines[j])
+                j += 1
+            body = " ".join(p.strip() for p in parts if p.strip()).replace("**", "")
+            out.append("TL;DR " + _RAW_STAMP.sub("", body).strip())
+            i = j
+            continue
+        if line.strip() and not _STEP_LINE.match(line) and _RAW_STAMP.search(line):
+            line = re.sub(r"\s+([.,;:!?])", r"\1", _RAW_STAMP.sub("", line))
+        out.append(line)
+        i += 1
+    return "\n".join(out).strip()
+
+
 def sanitize(text: str) -> str:
     """Strip ANSI escapes and control characters before printing.
 

@@ -72,8 +72,17 @@ def power_mode() -> str:
     return "normal"
 
 
+def _writer_of(r) -> str:
+    """Which model wrote a row's summary. Rows from before Claude existed here are local.
+
+    A SPLIT, like power mode: Claude summarises a 20-minute video in ~20 s with no model to
+    load, the local 27B in minutes, and one fit across both would be wrong for both."""
+    return r.get("writer") or "local"
+
+
 def record(minutes: float, cached: bool, ctx: int, timings: dict, native: bool = False,
-           predicted: dict | None = None, warm: bool = False, audio_mb: float = 0.0):
+           predicted: dict | None = None, warm: bool = False, audio_mb: float = 0.0,
+           writer: str = "local"):
     """Append one finished run, WITH the prediction it was given.
 
     Storing only the actuals makes the log self-improving but unfalsifiable — you can see
@@ -85,6 +94,7 @@ def record(minutes: float, cached: bool, ctx: int, timings: dict, native: bool =
         row = {"at": time.time(), "minutes": round(minutes, 2), "cached": bool(cached),
                "ctx": int(ctx or 0), "power": power_mode(), "native": bool(native),
                "warm": bool(warm), "audio_mb": round(float(audio_mb or 0), 2),
+               "writer": writer or "local",
                "timings": {k: round(float(v), 2) for k, v in (timings or {}).items()
                            if not k.startswith("_")},
                "predicted": {k: round(float(v), 2) for k, v in (predicted or {}).items()}}
@@ -98,7 +108,7 @@ def record(minutes: float, cached: bool, ctx: int, timings: dict, native: bool =
 FRAMES = os.path.expanduser("~/.ytgist/frames.jsonl")
 
 
-def record_frames(takeaways: int, picked: int, secs: float):
+def record_frames(takeaways: int, picked: int, secs: float, writer: str = "local"):
     """One screenshot pass. Its own file, for the same reason expansions have one: it is a
     different shape of work — a vision model load, N contact sheets, and a video download
     only for the moments that were chosen — and averaging it into the summarise fit would
@@ -106,14 +116,14 @@ def record_frames(takeaways: int, picked: int, secs: float):
     try:
         os.makedirs(os.path.dirname(FRAMES), exist_ok=True)
         row = {"at": time.time(), "takeaways": int(takeaways), "picked": int(picked),
-               "power": power_mode(), "secs": round(float(secs), 2)}
+               "power": power_mode(), "secs": round(float(secs), 2), "writer": writer or "local"}
         with open(FRAMES, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
     except Exception:
         pass
 
 
-def frames_rate(default: float = 7.0) -> float:
+def frames_rate(default: float = 7.0, writer: str = "local") -> float:
     """Seconds per takeaway for a screenshot pass, measured on this machine.
 
     The model load is in there too — it is paid once per pass and there is no honest way
@@ -121,7 +131,8 @@ def frames_rate(default: float = 7.0) -> float:
     and that is the right direction for an ETA."""
     try:
         rows = [json.loads(l) for l in open(FRAMES, encoding="utf-8") if l.strip()]
-        rows = [r for r in rows if r.get("takeaways") and r.get("secs")]
+        rows = [r for r in rows if r.get("takeaways") and r.get("secs")
+                and _writer_of(r) == (writer or "local")]
         if not rows:
             return default
         rows = rows[-12:]
@@ -130,7 +141,8 @@ def frames_rate(default: float = 7.0) -> float:
         return default
 
 
-def record_expand(minutes: float, chars: int, warm: bool, secs: float, native: bool = False):
+def record_expand(minutes: float, chars: int, warm: bool, secs: float, native: bool = False,
+                  writer: str = "local"):
     """One "more detail" click. Kept in its OWN file, not runs.jsonl.
 
     An expansion is a different animal from a gist run — no download, no transcription, a
@@ -142,7 +154,7 @@ def record_expand(minutes: float, chars: int, warm: bool, secs: float, native: b
         os.makedirs(os.path.dirname(EXPANDS), exist_ok=True)
         row = {"at": time.time(), "window_min": round(minutes, 2), "chars": int(chars),
                "warm": bool(warm), "native": bool(native), "power": power_mode(),
-               "secs": round(float(secs), 2)}
+               "secs": round(float(secs), 2), "writer": writer or "local"}
         with open(EXPANDS, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
     except Exception:
@@ -238,7 +250,7 @@ def _fit(rows, phase):
     return (max(my - slope * mx, 0.0), slope)
 
 
-def fit_summarise(rows=None):
+def fit_summarise(rows=None, writer="local"):
     """(seconds per takeaway, seconds per minute of video) — or None.
 
     THE "FIXED" PART WAS NEVER FIXED; it is proportional to how much gets WRITTEN, and what
@@ -252,7 +264,8 @@ def fit_summarise(rows=None):
     import gist_prompt
     rows = _rows() if rows is None else rows
     keep = [r for r in rows
-            if (r.get("timings") or {}).get("summarise") and r.get("minutes", 0) > 0]
+            if (r.get("timings") or {}).get("summarise") and r.get("minutes", 0) > 0
+            and _writer_of(r) == (writer or "local")]
     if len(keep) < MIN_SAMPLES + 1:
         return None
     keep = keep[-(WINDOW + HALF_LIFE * 2):]
@@ -340,24 +353,28 @@ def _median_load(rows, ctx, warm=False):
     return statistics.median(allv) if len(allv) >= MIN_SAMPLES else None
 
 
-def learned(power: str, ctx: int, warm: bool = False) -> dict:
+def learned(power: str, ctx: int, warm: bool = False, writer: str = "local") -> dict:
     """What the log knows, as {phase: seconds-per-minute} plus {"model load": seconds}.
 
     Missing keys mean "not enough evidence yet" and the caller keeps its own default —
-    partial knowledge is used where it exists rather than discarded wholesale."""
+    partial knowledge is used where it exists rather than discarded wholesale.
+
+    Downloading and transcribing are this machine's work whoever writes the summary, so
+    they learn from every run; summarising and the model load only from runs by `writer`."""
     rows = _rows()
     if not rows:
         return {}
     same = [r for r in rows if r.get("power") == power]
     # Enough same-power runs to stand on their own? Use only those; otherwise everything.
     src = same if len(same) >= MIN_SAMPLES else rows
+    mine = [r for r in src if _writer_of(r) == (writer or "local")]
 
     out = {}
     for phase in SCALING:
-        fit = _fit(src, phase)
+        fit = _fit(mine if phase == "summarise" else src, phase)
         if fit is not None:
             out[phase] = fit                  # (fixed seconds, seconds per minute)
-    load = _median_load(src, ctx, warm)
+    load = _median_load(mine, ctx, warm)
     if load is not None:
         out["model load"] = load
     out["_samples"] = len(src)

@@ -31,11 +31,12 @@ def main(runs, writers):
                 continue
             t0 = time.time()
             try:
+                # Each writer checks its own citations, as in the 8 Oct comparison.
                 if w == "local":
                     with shed.hold("ytgist: brief comparison (local model)"):
-                        rep = research.combine(r)
+                        rep = research.combine(r, writer="local", checker="local")
                 else:
-                    rep = research.combine(r, writer=w)
+                    rep = research.combine(r, writer=w, checker=w)
             except Exception as e:      # one failure must not stop the others
                 print(rid, w, "FAILED", e, flush=True)
                 continue

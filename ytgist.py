@@ -5,9 +5,10 @@
     ytgist "…" --ask "what did they say about pricing?"
     ytgist "…" --model coder          # A/B the 27B dense against Coder-Next
 
-PIPELINE: yt-dlp (audio only) → Parakeet v3 (chunked, timestamped) → Qwen 27B.
-No cleanup model: the reader is a 27B that handles "um" fine, and rewriting sentences
-would break their alignment with the timestamps (Denis, 2026-08-08).
+PIPELINE: yt-dlp (audio only) → Parakeet v3 (chunked, timestamped) → the summary model:
+Claude Haiku with an API key, else the local Qwen 27B (models.py decides, per step).
+No cleanup model: the reader handles "um" fine, and rewriting sentences would break their
+alignment with the timestamps (Denis, 2026-08-08).
 
 WHY IT DOESN'T IMPORT MYNA. An earlier plan called dictate._pk_load(). That drags in
 Myna's whole module — audio devices, hotkey monitors, the engine client — and depends on
@@ -16,6 +17,7 @@ through parakeet-mlx's PUBLIC from_pretrained. Same model, no coupling, and Myna
 .engine preference is never touched.
 """
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -26,8 +28,11 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import claude_client
 import gist_prompt
 import model_client
+import models
+import shed
 import timing_log
 import youtube_ingest as yt
 from youtube_ingest import IngestError
@@ -55,6 +60,11 @@ CACHE_V = 1
 # These are ESTIMATES SHOWN TO A HUMAN, so they are tuned to run slightly long. An ETA
 # that expires while you are still waiting is worse than one you beat.
 RATE = {"download": 0.30, "transcribe": 0.65, "summarise": 4.2}
+# CLAUDE'S, until the log has its own: Haiku 5.5 summarised six 7-20 minute videos in 8-27 s
+# (8 Oct 2026), so a few seconds plus about one per minute, again tuned to run long. There is
+# no model to load. Screenshots: one sheet question per takeaway, plus the 720p grab.
+CLAUDE_SUMMARISE = (8.0, 1.2)       # (seconds, seconds per minute of video)
+CLAUDE_FRAMES_RATE = 9.0            # seconds per takeaway, a guess the log replaces
 
 # THE HARD LIMIT. Beyond the largest context we will start, the only way to proceed is to
 # summarise the transcript in halves and merge — each half written blind to the other, so
@@ -68,8 +78,10 @@ LOAD_BASE, LOAD_PER_MIN = 4.0, 0.14
 
 
 def max_minutes() -> float:
-    """Longest video that fits the biggest context we will start, in one pass."""
-    room = model_client.ctx_ceiling() - 2048 - 1400    # answer + prompt overhead
+    """Longest video that fits the biggest context we will start, in one pass. When Claude
+    writes the summary that is Claude's context, not this machine's."""
+    ceiling = claude_client.CONTEXT if models.is_claude("gist") else model_client.ctx_ceiling()
+    room = ceiling - 2048 - 1400    # answer + prompt overhead
     return room * CHARS_PER_TOKEN / CHARS_PER_SEC / 60
 
 
@@ -89,7 +101,9 @@ def frames_cost(takeaways: int = 12) -> float:
     A model load, then a sheet read per takeaway, then a short download for each moment
     that was picked — so it scales with takeaways rather than with video length, and the
     log is the only honest source for the per-takeaway rate."""
-    return timing_log.frames_rate() * max(takeaways, 1)
+    w = models.for_step("frames")
+    rate = timing_log.frames_rate(CLAUDE_FRAMES_RATE if w != models.LOCAL else 7.0, writer=w)
+    return rate * max(takeaways, 1)
 
 
 def estimate(minutes: float, cached: bool, shots: bool = False) -> dict:
@@ -97,9 +111,11 @@ def estimate(minutes: float, cached: bool, shots: bool = False) -> dict:
 
     Built-in rates are the FLOOR, not the answer: whatever the timing log has measured on
     this machine, at this power mode, wins. Each finished run makes this sharper."""
+    writer = models.for_step("gist")
+    claude = writer != models.LOCAL
     ctx = model_client.ctx_for(int(minutes * 60 * CHARS_PER_SEC / CHARS_PER_TOKEN) + 1400)
     known = timing_log.learned(timing_log.power_mode(), ctx,
-                               warm=model_client.warm_available())
+                               warm=model_client.warm_available(), writer=writer)
 
     mbpm = timing_log.mb_per_minute()
     bw = timing_log.bandwidth()
@@ -111,7 +127,7 @@ def estimate(minutes: float, cached: bool, shots: bool = False) -> dict:
 
     # Summarising is driven by how much is WRITTEN as well as how much is read, and the
     # step count is known before the run starts.
-    sm = timing_log.fit_summarise()
+    sm = timing_log.fit_summarise(writer=writer)
 
     def summarise_cost():
         if not sm:
@@ -124,9 +140,11 @@ def estimate(minutes: float, cached: bool, shots: bool = False) -> dict:
         fit = known.get(phase)
         if isinstance(fit, tuple):
             return fit[0] + fit[1] * minutes
+        if claude and phase == "summarise":
+            return CLAUDE_SUMMARISE[0] + CLAUDE_SUMMARISE[1] * minutes
         return RATE[phase] * minutes
 
-    load = known.get("model load", LOAD_BASE + LOAD_PER_MIN * minutes)
+    load = known.get("model load", 0.0 if claude else LOAD_BASE + LOAD_PER_MIN * minutes)
     if isinstance(load, tuple):
         load = load[0] + load[1] * minutes
 
@@ -168,12 +186,16 @@ def save_expansion(vid, native, start, text):
     save_summary(vid, saved, native)
 
 
-def expand(vid, start, end, headline, body, native=False, log=print):
+def expand(vid, start, end, headline, body, native=False, log=print, writer=None):
     """More detail about ONE takeaway, from that takeaway's own span of the transcript.
 
     Cheaper and safer than a free question: the window is fixed by the argument's own
     structure, so there is nothing else in context to invent from. Returns "" when the
-    passage genuinely adds nothing, which the prompt is explicitly allowed to say."""
+    passage genuinely adds nothing, which the prompt is explicitly allowed to say.
+
+    `writer` defaults to models.py's choice. A failed Claude call raises ClaudeError; the
+    caller retries with writer="local" under the GPU locks Claude doesn't need."""
+    writer = writer or models.for_step("expand")
     cached = load_cached(vid)
     if not cached:
         raise IngestError("missing", "That transcript is no longer cached.")
@@ -193,11 +215,15 @@ def expand(vid, start, end, headline, body, native=False, log=print):
     system = gist_prompt.expand_system_for(native)
     need = len(system + user) // 2 + 600
     t0 = time.time()
-    srv = model_client.Server.acquire(need_tokens=need, model=MODELS["dense"], log=log)
+    if writer != models.LOCAL:
+        srv = claude_client.Session(writer)
+    else:
+        srv = model_client.Server.acquire(need_tokens=need, model=MODELS["dense"], log=log)
     warm = getattr(srv, "was_warm", False)
     with srv:
         out = srv.chat(system, user, max_tokens=600, temperature=0.25)
-    timing_log.record_expand((end - start) / 60, len(user), warm, time.time() - t0, native)
+    timing_log.record_expand((end - start) / 60, len(user), warm, time.time() - t0, native,
+                             writer=writer)
     if "NOTHING FURTHER" in out.upper():
         save_expansion(vid, native, start, "")   # "asked, and there is nothing" is an answer
         return ""
@@ -330,6 +356,28 @@ def _keep_frame(url, vid, n, cell, at, cols, rows, per_tile, kept_sigs):
                 pass
 
 
+def _gpu(task, progress=None, control=None, stage="check", pct=1):
+    """Book the shared GPU (shed.py; a no-op without one), saying on the page who we are
+    waiting for. Stop works while waiting: the hold raises InterruptedError."""
+    return shed.hold(task,
+                     wait_msg=(lambda t: progress({"stage": stage, "pct": pct, "msg": t}))
+                     if progress else None,
+                     cancelled=(lambda: control.cancelled.is_set()) if control is not None else None)
+
+
+@contextlib.contextmanager
+def _looker(writer, progress=None, control=None):
+    """Something that can look at a contact sheet: Claude (nothing to load, no GPU), or the
+    local model with its projector, on a GPU booked for it. The booking joins one the caller
+    already holds, so a summary-then-screenshots run still books once."""
+    if writer != models.LOCAL:
+        yield claude_client.Session(writer)
+        return
+    with _gpu("finding screenshots", progress, control, "frames", 2):
+        with model_client.Server.acquire_vision(model=MODELS["dense"], log=log) as srv:
+            yield srv
+
+
 def find_frames(url, vid, native=False, progress=None, control=None):
     """Look for a screenshot worth showing beside each takeaway.
 
@@ -374,9 +422,9 @@ def find_frames(url, vid, native=False, progress=None, control=None):
     # Cells are ruled out in the question; the pictures themselves are compared after the
     # grab, which is the only way to catch the second kind.
     used_cells, kept_sigs = {}, []
-    srv = model_client.Server.acquire_vision(model=MODELS["dense"], log=log)
+    writer = models.for_step("frames")
     t0 = time.time()
-    with srv:
+    with _looker(writer, progress, control) as srv:
         for i, (headline, secs) in enumerate(items):
             # .is_set(), not the Event itself — an Event object is always truthy, so the
             # bare attribute cancelled every pass on its first takeaway.
@@ -410,7 +458,7 @@ def find_frames(url, vid, native=False, progress=None, control=None):
     saved["frames_v"], saved["frames"] = FRAMES_V, decisions
     saved["frames_outcome"] = outcome
     save_summary(vid, saved, native)
-    timing_log.record_frames(len(items), picked, time.time() - t0)
+    timing_log.record_frames(len(items), picked, time.time() - t0, writer=writer)
     log(f"  screenshots: {outcome} in {time.time() - t0:.0f}s")
     return decisions, outcome
 
@@ -839,9 +887,13 @@ def run(url, model_key="dense", refresh=False, progress=None,
             size = audio_mb = os.path.getsize(wav) / 1e6
             log(f"→ transcribing {size:.0f} MB of audio …")
             step("transcribe", 40, f"{size:.0f} MB on the GPU")
-            t0 = time.time()
-            with phase("transcribe"):
-                sentences = transcribe(wav)
+            # THE GPU IS BOOKED FOR THE TRANSCRIPT ITSELF. With Claude writing the summary
+            # this is the only part of a run that needs the card, so a render waits seconds
+            # for it, not the whole run (joins the job's booking when it holds one).
+            with _gpu("transcribing a video", progress, control, "transcribe", 40):
+                t0 = time.time()
+                with phase("transcribe"):
+                    sentences = transcribe(wav)
             el = time.time() - t0
             log(f"   {len(sentences)} segments in {el:.0f}s "
                 f"({info['duration'] / max(el, 0.1):.0f}x realtime)")
@@ -887,42 +939,70 @@ def run(url, model_key="dense", refresh=False, progress=None,
         steps=gist_prompt.steps_for(meta.get("duration", 0) / 60))
     user += gist_prompt.NATIVE_RULE if native else gist_prompt.ENGLISH_RULE
 
-    step("summarise", 75, "27B, one pass over the whole transcript")
+    # WHO WRITES IT: models.py's choice (Claude Haiku with a key), unless the CLI asked for
+    # a specific local model to compare.
+    writer = models.for_step("gist") if model_key == "dense" else models.LOCAL
+    system = gist_prompt.system_for(native)
     log("→ summarising …")
     # Estimated BEFORE the server exists, because the server's own tokeniser is what we
     # would otherwise need to size it. Two chars per token is the Cyrillic rate measured
     # on a real transcript; it over-estimates Latin text, and over-estimating only costs a
     # little unused context, where under-estimating costs a whole halved summary.
     srv_ctx, srv_warm, audio_mb = 0, False, 0.0
-    est = len(gist_prompt.system_for(native) + user) // 2 + 1400
-    with phase("model load"):
-        _srv = model_client.Server.acquire(need_tokens=est, model=MODELS[model_key], log=log)
-    # Handing the server to the controller is what makes STOP work during generation.
-    # Between step() checkpoints the process sits inside one blocking HTTP call for
-    # minutes; there is nothing to poll. Stopping our own llama-server breaks that call,
-    # which is the only way to interrupt it that does not require the model to cooperate.
-    if control is not None:
-        control.server = _srv
-    srv_ctx, srv_warm = _srv.ctx, getattr(_srv, "was_warm", False)
-    with _srv as srv:
-        # The length gate above uses an ESTIMATE; this is the server's own tokeniser
-        # having the last word. It should never fire — the estimate deliberately runs
-        # high — but if it does, refusing is the honest outcome. There is no longer a
-        # halving path to fall back to, by design.
-        need = srv.count_tokens(gist_prompt.system_for(native) + user) + 1400
-        if need > srv.ctx:
-            raise TooLong(
-                f"That transcript needs ~{need:,} tokens and the largest context ytgist "
-                f"will start holds {srv.ctx:,}. Refusing rather than summarising it in "
-                f"halves, which loses whatever connects the two."
-            )
-        with phase("summarise"):
-            try:
-                out = srv.chat(gist_prompt.system_for(native), user)
-            except Exception:
-                if control is not None and control.cancelled.is_set():
-                    raise Cancelled()
-                raise
+    est = len(system + user) // 2 + 1400
+    usage = {}                   # Claude's tokens, by model
+
+    def summarise(acquire):
+        """One pass over the whole transcript, by whatever `acquire` hands back."""
+        nonlocal srv_ctx, srv_warm
+        with phase("model load"):
+            _srv = acquire()
+        # Handing the server to the controller is what makes STOP work during generation.
+        # Between step() checkpoints the process sits inside one blocking HTTP call for
+        # minutes; there is nothing to poll. Stopping our own llama-server breaks that call,
+        # which is the only way to interrupt it that does not require the model to cooperate.
+        # (A Claude session can't recall its request; stopped, it discards the answer.)
+        if control is not None:
+            control.server = _srv
+        srv_ctx, srv_warm = _srv.ctx, getattr(_srv, "was_warm", False)
+        with _srv as srv:
+            # The length gate above uses an ESTIMATE; this is the server's own tokeniser
+            # having the last word. It should never fire — the estimate deliberately runs
+            # high — but if it does, refusing is the honest outcome. There is no longer a
+            # halving path to fall back to, by design.
+            need = srv.count_tokens(system + user) + 1400
+            if need > srv.ctx:
+                raise TooLong(
+                    f"That transcript needs ~{need:,} tokens and the largest context ytgist "
+                    f"will start holds {srv.ctx:,}. Refusing rather than summarising it in "
+                    f"halves, which loses whatever connects the two."
+                )
+            with phase("summarise"):
+                try:
+                    return srv.chat(system, user)
+                except Exception:
+                    if control is not None and control.cancelled.is_set():
+                        raise Cancelled()
+                    raise
+
+    out = None
+    if writer != models.LOCAL:
+        step("summarise", 75, f"{models.label(writer)}, one pass over the whole transcript")
+        try:
+            out = summarise(lambda: claude_client.Session(writer, usage))
+        except claude_client.ClaudeError as e:
+            # A summary must not fail over an API hiccup: the local model is still here.
+            log(f"  {models.label(writer)} failed ({e}); summarising with the local model")
+            writer = models.LOCAL
+            for k in ("model load", "summarise"):
+                timings.pop(k, None)
+    if out is None:
+        step("summarise", 75, "27B, one pass over the whole transcript")
+        # The local model needs the GPU: booked here, or joining the job's own booking.
+        with _gpu("summarising a video", progress, control, "summarise", 75):
+            out = summarise(lambda: model_client.Server.acquire(
+                need_tokens=est, model=MODELS[model_key], log=log))
+    out = gist_prompt.tidy(out)
 
     # NOT DONE YET IF SCREENSHOTS ARE STILL TO COME. Saying "done" and then working on
     # for two more minutes is the bar lying about the run it is drawing.
@@ -941,14 +1021,15 @@ def run(url, model_key="dense", refresh=False, progress=None,
                            "gist_v": GIST_V, "text": text, "at": time.time(),
                            "title": meta.get("title", ""),
                            "exp_v": EXP_V, "native": bool(native),
-                           "duration": meta.get("duration", 0)})
+                           "duration": meta.get("duration", 0),
+                           "writer": writer, "cost_usd": claude_client.total_cost(usage)})
     run.last = {"title": meta.get("title", ""), "markdown": text, "dropped": dropped,
                 "video_id": vid, "timings": timings,
                 "duration": meta.get("duration", 0), "cached": was_cached,
                 "sentences": sentences,   # the UI shows the evidence behind each claim
                 "expansions": {}, "frames": [], "frames_outcome": ""}
     timing_log.record(meta.get("duration", 0) / 60, was_cached, srv_ctx, timings, native,
-                      predicted=predicted, warm=srv_warm, audio_mb=audio_mb)
+                      predicted=predicted, warm=srv_warm, audio_mb=audio_mb, writer=writer)
     # THE SUMMARY IS ALREADY SAVED AND run.last ALREADY SET before this runs. A screenshot
     # pass that fails — no storyboard, no memory, a refused download — must cost the
     # summary nothing, so it can only ADD to a result that is complete without it.

@@ -12,9 +12,12 @@
             model invents is checked against that video's own summary and its timestamp is
             dropped if it isn't there (the same rule ytgist applies to every summary).
 
-One research run at a time; the model is one physical resource. On the PC the whole run holds
-a GPU booking in the Shed, so a video render can't start halfway through.
+One research run at a time. Which model does each step is set in models.py: with an API key,
+Claude writes everything and the GPU is only booked for transcripts (each video's own job books
+it). A step that runs on the local model books the GPU in the Shed for itself, and a run whose
+steps are all local holds one booking throughout, so a video render can't start halfway through.
 """
+import contextlib
 import json
 import os
 import re
@@ -22,7 +25,9 @@ import threading
 import time
 import uuid
 
+import claude_client
 import model_client
+import models
 import shed
 import ytgist
 import youtube_ingest as yt
@@ -44,6 +49,15 @@ _active = {"id": None, "stop": None}
 
 class Busy(Exception):
     pass
+
+
+def _hold(task, **kw):
+    """The GPU booking for the run itself: only when one of its own steps runs locally.
+    With Claude on every step the run never touches the GPU, and booking it anyway would make
+    a render wait for nothing (each video's transcript job still books it for itself)."""
+    if all(models.is_claude(s) for s in ("queries", "pick", "brief", "check")):
+        return contextlib.nullcontext()
+    return shed.hold(task, **kw)
 
 
 # ----------------------------------------------------------------------- storage
@@ -157,7 +171,7 @@ def recombine(rid):
 
     def work():
         try:
-            with shed.hold("YouTube research: rewriting a brief", cancelled=stop.is_set):
+            with _hold("YouTube research: rewriting a brief", cancelled=stop.is_set):
                 rr = load(rid)
                 rr["report"] = combine(rr, stop)
                 rr["status"], rr["msg"], rr["error"] = "done", "", None
@@ -217,10 +231,11 @@ def _run(rid, stop):
         _save(r)
 
     try:
-        with shed.hold("YouTube research: " + r["topic"][:40],
-                       wait_msg=lambda t: say(msg=t), cancelled=stop.is_set):
+        with _hold("YouTube research: " + r["topic"][:40],
+                   wait_msg=lambda t: say(msg=t), cancelled=stop.is_set):
             say(msg="Working out what to search for")
-            r["queries"] = queries_for(r["topic"], stop)
+            spend = {}                   # Claude tokens for searching and picking, by model
+            r["queries"] = queries_for(r["topic"], stop, usage=spend)
             say(msg=f"Searching YouTube {len(r['queries'])} ways")
             cands = search_all(r["queries"])
             r["searched"] = len(cands)
@@ -228,17 +243,17 @@ def _run(rid, stop):
             if len(cands) < 2:
                 raise RuntimeError("YouTube returned almost nothing for that topic. Try other words.")
             say(status="picking")
-            picks, r["subject"] = pick(r["topic"], cands, r["n"], stop)
+            picks, r["subject"] = pick(r["topic"], cands, r["n"], stop, usage=spend)
             if len(picks) < min(r["n"], WIDEN_BELOW):
                 say(msg=f"Only {len(picks)} fit. Searching wider")
-                more = queries_for(r["topic"], stop, tried=r["queries"])
+                more = queries_for(r["topic"], stop, tried=r["queries"], usage=spend)
                 if more:
                     r["wider_at"] = len(r["queries"])
                     r["queries"] = r["queries"] + more
                     cands = search_all(r["queries"], limit=72)
                     r["searched"] = len(cands)
                     say(msg=f"Found {len(cands)} videos. Choosing again")
-                    picks, r["subject"] = pick(r["topic"], cands, r["n"], stop)
+                    picks, r["subject"] = pick(r["topic"], cands, r["n"], stop, usage=spend)
             if len(picks) < 2:
                 raise RuntimeError("Fewer than two videos on YouTube fit that topic closely. "
                                    "Try broader words, or split it into two topics.")
@@ -251,6 +266,7 @@ def _run(rid, stop):
             r = load(rid)
             r["report"] = combine(r, stop)
             r["finished"] = time.time()
+            r["usage"], r["cost_usd"] = spend, claude_client.total_cost(spend)
             _save(r)                     # before say(): say() re-reads the file
             _write_markdown(r)
             say(status="done", msg="")
@@ -289,7 +305,7 @@ Don't repeat a search that was already tried. Same language as the topic.
 Answer with JSON only: {"queries": ["...", "...", "..."]}"""
 
 
-def queries_for(topic, stop=None, tried=None):
+def queries_for(topic, stop=None, tried=None, usage=None):
     """The topic as typed, plus three short rewrites by the model. A single YouTube search only
     sees what YouTube ranks for that exact phrase (Denis, 7 Oct); pooling several finds more.
     Rewrites are kept short because long, stacked queries return noise (Denis, 7 Oct: a
@@ -302,11 +318,10 @@ def queries_for(topic, stop=None, tried=None):
     system = WIDER_SYSTEM if tried else QUERY_SYSTEM
     user = f"Topic: {topic}" + ("\nAlready tried:\n" + "\n".join(f"- {q}" for q in tried) if tried else "")
     try:
-        with (_run_lock or threading.Lock()):
-            if stop is not None and stop.is_set():
-                raise InterruptedError
-            with model_client.Server.acquire(2000, log=lambda *_: None) as srv:
-                raw = srv.chat(system, user, max_tokens=200, temperature=0.0)   # same topic, same searches
+        if stop is not None and stop.is_set():
+            raise InterruptedError
+        # temperature 0: same topic, same searches (Claude ignores it and varies a little)
+        raw = _llm(models.for_step("queries"), system, user, 200, 0.0, ctx_extra=1200, usage=usage)
         m = re.search(r"\{.*\}", raw, re.S)
         for q in (json.loads(m.group(0)).get("queries") if m else []) or []:
             q = " ".join(str(q).split())[:120]
@@ -393,7 +408,8 @@ def _fmt_dur(s):
     return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
 
 
-def pick(topic, cands, n, stop=None):
+def pick(topic, cands, n, stop=None, writer=None, usage=None):
+    writer = writer or models.for_step("pick")
     lines = []
     for i, c in enumerate(cands, 1):
         views = f" · {c['views']:,} views" if c.get("views") else ""
@@ -404,11 +420,10 @@ def pick(topic, cands, n, stop=None):
     scores, why, subject, changes, judged = {}, {}, "", False, False
     budget = 400 + 30 * len(cands)          # one short line per result
     try:
-        with (_run_lock or threading.Lock()):
-            if stop is not None and stop.is_set():
-                raise InterruptedError
-            with model_client.Server.acquire(len(user) // 2 + budget + 600, log=lambda *_: None) as srv:
-                raw = srv.chat(PICK_SYSTEM, user, max_tokens=budget, temperature=0.0)   # same pool, same picks
+        if stop is not None and stop.is_set():
+            raise InterruptedError
+        # temperature 0: same pool, same picks (Claude ignores it; its picks vary a little)
+        raw = _llm(writer, PICK_SYSTEM, user, budget, 0.0, ctx_extra=budget + 600, usage=usage)
         m = re.search(r"\{.*\}", raw, re.S)
         data = json.loads(m.group(0)) if m else {}
         subject = " ".join(str(data.get("subject") or "").split())[:80]
@@ -419,7 +434,7 @@ def pick(topic, cands, n, stop=None):
                 scores[i] = max(0, min(3, int(row.get("s", 0))))
                 why[i] = str(row.get("why") or "")[:120]
         judged = bool(scores)
-    except (model_client.ModelError, ValueError, KeyError, TypeError, AttributeError) as e:
+    except (model_client.ModelError, ValueError, KeyError, TypeError, AttributeError, RuntimeError) as e:
         ytgist.log(f"  research: the model couldn't score the results ({e}); falling back to search order")
 
     # The model scores every result; the choosing happens here, where it is the same every
@@ -570,21 +585,27 @@ def _said(vid, secs):
 
 
 def _llm(writer, system, user, max_tokens, temperature, ctx_extra=1500, usage=None):
-    """One call to whichever model writes this brief: the local one, or Claude (a model id
-    like "claude-sonnet-5-5"). Token usage of Claude calls is added to `usage`."""
+    """One call to the model a step uses: Claude (a model id like "claude-haiku-5-5") or the
+    local one ("local"). A Claude call that fails falls back to the local model, so a run
+    doesn't die of an API hiccup. Claude's token usage is added to `usage`, by model."""
     if writer and writer.startswith("claude"):
-        import claude_client
-        text, u = claude_client.chat(writer, system, user, max_tokens=max_tokens, temperature=temperature)
-        if usage is not None:
-            for k in ("input_tokens", "output_tokens"):
-                usage[k] = usage.get(k, 0) + int(u.get(k) or 0)
-        return text
-    with (_run_lock or threading.Lock()):
+        try:
+            text, u = claude_client.chat(writer, system, user, max_tokens=max_tokens,
+                                         temperature=temperature)
+            claude_client.add_usage(usage, writer, u)
+            return text
+        except claude_client.ClaudeError as e:
+            ytgist.log(f"  research: {writer} failed ({e}); using the local model instead")
+    # The local model needs the GPU: one server at a time, and booked in the Shed (a no-op
+    # inside a run that already holds the booking, or on a machine without one).
+    with (_run_lock or threading.Lock()), shed.hold("YouTube research"):
         with model_client.Server.acquire(len(user) // 2 + ctx_extra, log=lambda *_: None) as srv:
             return srv.chat(system, user, max_tokens=max_tokens, temperature=temperature)
 
 
-def combine(r, stop=None, writer=None):
+def combine(r, stop=None, writer=None, checker=None):
+    """The brief, by `writer` (default: models.py's "brief"), its citations checked by
+    `checker` (default: "check")."""
     sources, blocks, stamps = [], [], {}
     for p in r["picks"]:
         if p["status"] != "succeeded":
@@ -607,22 +628,29 @@ def combine(r, stop=None, writer=None):
     if stop is not None and stop.is_set():
         raise InterruptedError
     usage = {}
-    if writer and writer.startswith("claude"):
-        raw = _llm(writer, COMBINE_SYSTEM.format(lang=lang, steps=steps), user, 4200, 0.3, usage=usage)
-    else:
-        with (_run_lock or threading.Lock()):
+    writer = writer or models.for_step("brief")
+    system = COMBINE_SYSTEM.format(lang=lang, steps=steps)
+    raw = None
+    if writer.startswith("claude"):
+        try:
+            raw, u = claude_client.chat(writer, system, user, max_tokens=4200)
+            claude_client.add_usage(usage, writer, u)
+        except claude_client.ClaudeError as e:
+            ytgist.log(f"  research: {writer} failed ({e}); writing the brief with the local model")
+            writer = models.LOCAL
+    if raw is None:
+        with (_run_lock or threading.Lock()), shed.hold("YouTube research: writing the brief"):
             with model_client.Server.acquire(len(user) // 2 + 4500, log=lambda *_: None) as srv:
                 if srv.count_tokens(user) + 4500 > srv.ctx:
                     raise RuntimeError("Too much to combine in one pass; try fewer videos.")
-                raw = srv.chat(COMBINE_SYSTEM.format(lang=lang, steps=steps), user,
-                               max_tokens=4200, temperature=0.3)
-    rep = _structure(raw, sources, stamps, r["native"], writer=writer, usage=usage)
-    rep["writer"] = writer or "local"
+                raw = srv.chat(system, user, max_tokens=4200, temperature=0.3)
+    checker = checker or models.for_step("check")
+    rep = _structure(raw, sources, stamps, r["native"], writer=checker, usage=usage)
+    rep["writer"], rep["checker"] = writer, checker
     rep["raw"] = raw
     if usage:
-        import claude_client
         rep["usage"] = usage
-        rep["cost_usd"] = claude_client.cost(writer, usage)
+        rep["cost_usd"] = claude_client.total_cost(usage)
     return rep
 
 
@@ -677,6 +705,7 @@ def _check_support(takeaways, writer=None, usage=None):
 
     Every removal is also returned with the model's reason, so the page can show what was cut
     and why, and a reader can disagree."""
+    writer = writer or models.for_step("check")
     items = []
     for ti, t in enumerate(takeaways):
         for c in t["cites"]:

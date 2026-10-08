@@ -12,6 +12,12 @@ Read this whole file before running anything. Several steps look like failures a
 A local pipeline: `yt-dlp` pulls audio only → Parakeet (MLX) transcribes with timestamps →
 a GGUF model behind `llama-server` writes a numbered argument → a Next.js page renders it.
 
+With an Anthropic API key (`ANTHROPIC_API_KEY` or `~/.ytgist/anthropic_key`), Claude takes
+over the writing steps: Haiku for summaries, search queries, picking, "more detail",
+screenshots and the citation check; Sonnet for the research brief (`models.py`). Transcripts
+stay local. Without a key nothing changes, and a failed Claude call falls back to the local
+model.
+
 Two processes, both local:
 
 | process | port | started by | what it owns |
@@ -196,6 +202,8 @@ small-RAM machines) so the next request skips the model load. It reaps itself.
 | `timing_log.py` | the self-calibrating ETA |
 | `gpu.py` | temperature/load via macmon and ioreg; nvidia-smi on a PC |
 | `research.py` | research mode: queries, search, pick, combine, verify, the standalone page |
+| `models.py` | which model does which step (Claude or local); override in `~/.ytgist/models.json` |
+| `claude_client.py` | the Anthropic API, and `Session`, Claude in the shape of a local server |
 | `shed.py` | optional booking of a shared GPU (`YTGIST_SHED`) |
 | `serve.py` | HTTP + SSE |
 
@@ -205,6 +213,8 @@ small-RAM machines) so the next request skips the model load. It reaps itself.
 
 - **Run `./node_modules/.bin/tsc --noEmit` and `npx eslint app` in `web/` after any UI edit.**
   `npx tsc` may resolve to an unrelated package; use the local binary.
+- **Claude's answers go through `gist_prompt.tidy` before `verify`.** It writes "**TL;DR**"
+  on its own line and adds extra timestamps inside sentences; the page can read neither.
 - **Prompts are tuned for Qwen3.6.** Sampling parameters in `model_client.py` come from its
   model card — `top_p 0.80, top_k 20, min_p 0.0, presence_penalty 1.5`. llama.cpp's defaults
   disagree on four of five, so they are sent explicitly. Do not remove them.
